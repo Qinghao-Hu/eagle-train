@@ -1,0 +1,8 @@
+accelerate
+datasets
+numpy
+pandas
+transformers
+torchdata
+deepspeed
+wandb
