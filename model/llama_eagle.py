@@ -47,9 +47,6 @@ class LlamaModel(LlamaModelTF):
 
         # self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Initialize weights and apply final processing
-        # self.post_init()
-
     def forward(
         self,
         base_model_hidden_states: torch.Tensor,

@@ -6,3 +6,4 @@ transformers
 torchdata
 deepspeed
 wandb
+hydra-core

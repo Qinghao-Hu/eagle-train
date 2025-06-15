@@ -1,0 +1,8 @@
+data:
+  data_path: /nobackup/qinghao/dataset/reasoning/OpenThoughts2-1M-bucketed
+  max_length: 35768  # Maximum sequence length
+  save_dir: /nobackup/qinghao/runs/eagle/eagle-sft-data
+  process_rank: 0
+model:
+  base_model_path: /nobackup/model/deepseek-r1/DeepSeek-R1-Distill-Qwen-7B # for step=1 only
+

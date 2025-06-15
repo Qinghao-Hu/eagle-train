@@ -15,48 +15,13 @@ import torch.distributed as dist
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
-from .model.llama_eagle import LlamaForCausalLMEagle
-from .model.qwen_eagle import Qwen2ForCausalLMEagle
+from model.llama_eagle import LlamaForCausalLMEagle
+from model.qwen_eagle import Qwen2ForCausalLMEagle
+from utils import Tracking
 
 set_seed(0)
 torch.backends.cuda.matmul.allow_tf32 = True
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "INFO"))
-
-
-class Tracking:
-    supported_backend = ["wandb", "console"]
-
-    def __init__(self, project_name, experiment_name, default_backend="console", config=None):
-        if isinstance(default_backend, str):
-            default_backend = [default_backend]
-
-        for backend in default_backend:
-            assert backend in self.supported_backend, f"{backend} is not supported"
-
-        self.logger = {}
-
-        if "tracking" in default_backend or "wandb" in default_backend:
-            import wandb
-
-            wandb.init(project=project_name, name=experiment_name, config=config)
-            self.logger["wandb"] = wandb
-
-        if "console" in default_backend:
-            from fastrl.utils.logger.aggregate_logger import LocalLogger
-
-            self.console_logger = LocalLogger(print_to_console=True)
-            self.logger["console"] = self.console_logger
-
-    def log(self, data, step, backend=None):
-        for default_backend, logger_instance in self.logger.items():
-            if backend is None or default_backend in backend:
-                logger_instance.log(data=data, step=step)
-
-    def __del__(self):
-        if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
-
 
 def add_args():
     parser = argparse.ArgumentParser(description="Eagle Trainer DeepSpeed")
@@ -73,7 +38,6 @@ def add_args():
     parser.add_argument("--value_weight", type=float, default=1.0, help="Weight for value loss")
     parser.add_argument("--prob_weight", type=float, default=0.1, help="Weight for probability loss")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
-    parser.add_argument("--checkpoint_path", type=str, default=None, help="Path to checkpoint to resume training")
     parser.add_argument("--load_optimizer", action="store_true", help="Whether to load optimizer states")
     parser.add_argument("--precision", type=str, default="fp16", choices=["fp16", "bf16"], help="Training precision type")
     parser = deepspeed.add_config_arguments(parser)
@@ -189,14 +153,36 @@ class EagleTrainerDeepSpeed:
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.rank = dist.get_rank()
         self.world_size = dist.get_world_size()
+        self.start_epoch = 0  # Track starting epoch for resume
 
         # Initialize model and datasets
         self._build_dataloader()
         self._build_model()
         self._initialize_deepspeed()
 
+        self._load_checkpoint()
+
         # Initialize loss functions
         self.criterion = nn.SmoothL1Loss(reduction="none")
+
+    def _load_checkpoint(self):
+        if os.path.exists(os.path.join(self.args.output_dir, "latest")):
+            load_path, client_state = self.model_engine.load_checkpoint(
+                self.args.output_dir,
+                load_optimizer_states=self.args.load_optimizer,
+                load_lr_scheduler_states=True,
+                load_module_only=False,
+            )
+
+            self.start_epoch = client_state["epoch"] + 1
+            steps_per_epoch = len(self.train_loader)
+            self.start_epoch = client_state["step"] // steps_per_epoch + 1
+
+            if self.rank == 0:
+                logger.info(f"Successfully loaded checkpoint from: {load_path}")
+                logger.info(f"Resuming training from epoch {self.start_epoch}")
+                if client_state:
+                    logger.info(f"Client state keys: {list(client_state.keys())}")
 
     def _build_model(self):
         # Load model config
@@ -204,8 +190,6 @@ class EagleTrainerDeepSpeed:
         config.num_hidden_layers = 1
         config.torch_dtype = torch.bfloat16 if self.args.precision == "bf16" else torch.float16
         config._attn_implementation = "flash_attention_2"
-        config.output_hidden_states = True
-        config.return_dict = True
 
         # Determine model class based on config
         model_class = None
@@ -309,7 +293,7 @@ class EagleTrainerDeepSpeed:
         datapath = []
         for root, dirs, files in os.walk(self.args.data_path):
             for file in files:
-                if file.endswith(".ckpt"):
+                if file.endswith(".ckpt") or file.endswith(".pt"):
                     file_path = os.path.join(root, file)
                     datapath.append(file_path)
 
@@ -372,7 +356,10 @@ class EagleTrainerDeepSpeed:
 
     def _compute_loss(self, batch):
         outputs = self.model_engine(
-            batch["hidden_states"], input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
+            batch["hidden_states"],
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            output_hidden_states=True,
         )
 
         # Extract hidden states from model output
@@ -431,8 +418,10 @@ class EagleTrainerDeepSpeed:
             tracking = Tracking(
                 project_name=self.args.project_name, experiment_name=self.args.experiment_name, default_backend="wandb"
             )
+        else:
+            tracking = None
 
-        for epoch in range(self.args.epochs):
+        for epoch in range(self.start_epoch, self.args.epochs):
             self.model_engine.train()
 
             if self.rank == 0:
@@ -453,27 +442,32 @@ class EagleTrainerDeepSpeed:
                 correct, total, top_k_acc = self._compute_metrics(out_head, target_head, batch["loss_mask"])
 
                 if self.rank == 0:
+                    global_step = epoch * len(self.train_loader) + batch_idx
                     metrics = {
                         "train/loss": loss.item(),
                         "train/vloss": vloss.item(),
                         "train/ploss": ploss.item(),
                         "train/acc": correct / (total + 1e-5),
                         "train/lr": self.optimizer.param_groups[0]["lr"],
+                        "train/epoch": epoch,
                     }
 
                     for k, acc in enumerate(top_k_acc):
                         metrics[f"train/top_{k+1}_acc"] = acc / (total + 1e-5)
 
-                    tracking.log(metrics, step=batch_idx)
-                    train_iter.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total):.2%}"})
+                    tracking.log(metrics, step=global_step)
+                    train_iter.set_postfix({"loss": f"{loss.item():.4f}", "acc": f"{(correct/total):.2%}", "epoch": epoch})
 
-            # Validation
-            if epoch % 1 == 0:
-                self.validate(epoch, tracking)
+            # self.validate(epoch, tracking)
 
-            # Save checkpoint
+            client_state = {
+                "epoch": epoch,
+                "step": epoch * len(self.train_loader) + len(self.train_loader) - 1,
+            }
+            self.model_engine.save_checkpoint(self.args.output_dir, client_state=client_state, exclude_frozen_parameters=False)
+
             if self.rank == 0:
-                self.model_engine.save_16bit_model(os.path.join(self.args.output_dir, f"checkpoint-{epoch}"))
+                logger.info(f"Checkpoint saved at epoch {epoch}: {self.args.output_dir}")
 
     def validate(self, epoch, tracking):
         self.model_engine.eval()
@@ -482,6 +476,8 @@ class EagleTrainerDeepSpeed:
         with torch.no_grad():
             for batch in self.val_loader:
                 batch = {k: v.cuda() for k, v in batch.items()}
+                batch["hidden_states"] = batch["hidden_states"].to(dtype=self.model.config.torch_dtype)
+                batch["target"] = batch["target"].to(dtype=self.model.config.torch_dtype)
                 loss, vloss, ploss, out_head, target_head = self._compute_loss(batch)
                 correct, total, top_k_acc = self._compute_metrics(out_head, target_head, batch["loss_mask"])
 
@@ -500,7 +496,8 @@ class EagleTrainerDeepSpeed:
         if self.rank == 0 and val_metrics:
             # Average validation metrics
             avg_metrics = {k: sum(d[k] for d in val_metrics) / len(val_metrics) for k in val_metrics[0].keys()}
-            tracking.log(avg_metrics)
+            if tracking is not None:
+                tracking.log(avg_metrics, step=epoch)
             logger.info(f"Validation metrics at epoch {epoch}: {avg_metrics}")
 
 

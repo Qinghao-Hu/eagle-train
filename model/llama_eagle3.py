@@ -114,12 +114,9 @@ class LlamaModel(LlamaModelTF):
 
         self.gradient_checkpointing = False
 
-        # Initialize weights and apply final processing
-        self.post_init()
-
     def forward(
         self,
-        base_model_hidden_states: torch.Tensor,  # NOTE: Modified here, can from the base model or self-generated
+        base_model_hidden_states: torch.Tensor,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -130,7 +127,6 @@ class LlamaModel(LlamaModelTF):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        q_hidden_states: Optional[torch.Tensor] = None,  # Add q_hidden_states parameter
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -167,12 +163,6 @@ class LlamaModel(LlamaModelTF):
         # (Qinghao): Modified here
         inputs_embeds = inputs_embeds.to(base_model_hidden_states.dtype)
         hidden_states = base_model_hidden_states
-
-        # Use q_hidden_states if provided
-        if q_hidden_states is not None:
-            # Get the last element of the sequence
-            last_q_hidden_states = q_hidden_states[-1]
-            hidden_states = last_q_hidden_states
 
         if hidden_states.shape[-1] != inputs_embeds.shape[-1]:
             hidden_states = self.fc(hidden_states)
@@ -264,7 +254,6 @@ class LlamaForCausalLMEagle3(LlamaForCausalLM):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
-        q_hidden_states: Optional[torch.Tensor] = None,  # Add q_hidden_states parameter
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -284,7 +273,6 @@ class LlamaForCausalLMEagle3(LlamaForCausalLM):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
-            q_hidden_states=q_hidden_states,  # Pass q_hidden_states to model
         )
 
         hidden_states = outputs[0]
@@ -308,84 +296,84 @@ class LlamaForCausalLMEagle3(LlamaForCausalLM):
             attentions=outputs.attentions,
         )
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, torch_dtype, *model_args, **kwargs):
-        # Create model with the provided config
-        config = kwargs.get("config", None)
-        if config is None:
-            raise ValueError("Config must be provided when loading a model from pretrained.")
+    # @classmethod
+    # def from_pretrained(cls, pretrained_model_name_or_path, torch_dtype, *model_args, **kwargs):
+    #     # Create model with the provided config
+    #     config = kwargs.get("config", None)
+    #     if config is None:
+    #         raise ValueError("Config must be provided when loading a model from pretrained.")
 
-        # Initialize the model with the config
-        model = cls(config, *model_args)
+    #     # Initialize the model with the config
+    #     model = cls(config, *model_args)
 
-        # Try to load model weights
-        try:
-            import os
-            from safetensors.torch import load_file as safe_load_file
-            import torch
-            from transformers.utils import WEIGHTS_NAME, SAFE_WEIGHTS_NAME
+    #     # Try to load model weights
+    #     try:
+    #         import os
+    #         from safetensors.torch import load_file as safe_load_file
+    #         import torch
+    #         from transformers.utils import WEIGHTS_NAME, SAFE_WEIGHTS_NAME
 
-            # Check if it's a directory or a file path
-            if os.path.isdir(pretrained_model_name_or_path):
-                safe_path = os.path.join(pretrained_model_name_or_path, SAFE_WEIGHTS_NAME)
-                pt_path = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
+    #         # Check if it's a directory or a file path
+    #         if os.path.isdir(pretrained_model_name_or_path):
+    #             safe_path = os.path.join(pretrained_model_name_or_path, SAFE_WEIGHTS_NAME)
+    #             pt_path = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
 
-                if os.path.exists(safe_path):
-                    logger.info(f"Loading weights from safetensors file: {safe_path}")
-                    state_dict = safe_load_file(safe_path)
-                elif os.path.exists(pt_path):
-                    logger.info(f"Loading weights from PyTorch file: {pt_path}")
-                    state_dict = torch.load(pt_path, map_location="cpu")
-                else:
-                    raise ValueError(f"No model weights found in {pretrained_model_name_or_path}")
-            else:
-                # Assume it's a direct file path
-                if pretrained_model_name_or_path.endswith(".safetensors"):
-                    logger.info(f"Loading weights from safetensors file: {pretrained_model_name_or_path}")
-                    state_dict = safe_load_file(pretrained_model_name_or_path)
-                else:
-                    logger.info(f"Loading weights from PyTorch file: {pretrained_model_name_or_path}")
-                    state_dict = torch.load(pretrained_model_name_or_path, map_location="cpu")
+    #             if os.path.exists(safe_path):
+    #                 logger.info(f"Loading weights from safetensors file: {safe_path}")
+    #                 state_dict = safe_load_file(safe_path)
+    #             elif os.path.exists(pt_path):
+    #                 logger.info(f"Loading weights from PyTorch file: {pt_path}")
+    #                 state_dict = torch.load(pt_path, map_location="cpu")
+    #             else:
+    #                 raise ValueError(f"No model weights found in {pretrained_model_name_or_path}")
+    #         else:
+    #             # Assume it's a direct file path
+    #             if pretrained_model_name_or_path.endswith(".safetensors"):
+    #                 logger.info(f"Loading weights from safetensors file: {pretrained_model_name_or_path}")
+    #                 state_dict = safe_load_file(pretrained_model_name_or_path)
+    #             else:
+    #                 logger.info(f"Loading weights from PyTorch file: {pretrained_model_name_or_path}")
+    #                 state_dict = torch.load(pretrained_model_name_or_path, map_location="cpu")
 
-            # Load the state dict into the model
-            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    #         # Load the state dict into the model
+    #         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
 
-            if len(missing_keys) > 0:
-                logger.warning(f"Missing keys: {missing_keys}")
-            if len(unexpected_keys) > 0:
-                logger.warning(f"Unexpected keys: {unexpected_keys}")
+    #         if len(missing_keys) > 0:
+    #             logger.warning(f"Missing keys: {missing_keys}")
+    #         if len(unexpected_keys) > 0:
+    #             logger.warning(f"Unexpected keys: {unexpected_keys}")
 
-            logger.info("Successfully loaded the weights into the model.")
-        except Exception as e:
-            logger.warning(f"Error loading state dict: {e}")
-            logger.warning("Using model with random initialization.")
+    #         logger.info("Successfully loaded the weights into the model.")
+    #     except Exception as e:
+    #         logger.warning(f"Error loading state dict: {e}")
+    #         logger.warning("Using model with random initialization.")
 
-        return model.to(torch_dtype)
+    #     return model.to(torch_dtype)
 
-    def load_state_dict(self, state_dict, strict=True):
-        # Fix the state_dict keys to match the expected structure
-        new_state_dict = {}
+    # def load_state_dict(self, state_dict, strict=True):
+    #     # Fix the state_dict keys to match the expected structure
+    #     new_state_dict = {}
 
-        # Print original keys for debugging
-        logger.info(f"Original state_dict keys: {list(state_dict.keys())}")
+    #     # Print original keys for debugging
+    #     logger.info(f"Original state_dict keys: {list(state_dict.keys())}")
 
-        # Handle model prefix for relevant keys
-        for key, value in state_dict.items():
-            if key in ["embed_tokens.weight", "norm.weight"]:
-                new_state_dict[f"model.{key}"] = value
-            elif key.startswith("midlayer."):
-                new_state_dict[f"model.{key}"] = value
-            elif key == "fc.weight":
-                new_state_dict["model.fc.weight"] = value
-            else:
-                new_state_dict[key] = value
+    #     # Handle model prefix for relevant keys
+    #     for key, value in state_dict.items():
+    #         if key in ["embed_tokens.weight", "norm.weight"]:
+    #             new_state_dict[f"model.{key}"] = value
+    #         elif key.startswith("midlayer."):
+    #             new_state_dict[f"model.{key}"] = value
+    #         elif key == "fc.weight":
+    #             new_state_dict["model.fc.weight"] = value
+    #         else:
+    #             new_state_dict[key] = value
 
-        # Print modified keys for debugging
-        logger.info(f"Modified state_dict keys: {list(new_state_dict.keys())}")
+    #     # Print modified keys for debugging
+    #     logger.info(f"Modified state_dict keys: {list(new_state_dict.keys())}")
 
-        # Get model expected keys for comparison
-        model_state = self.state_dict()
-        logger.info(f"Model expected keys: {list(model_state.keys())}")
+    #     # Get model expected keys for comparison
+    #     model_state = self.state_dict()
+    #     logger.info(f"Model expected keys: {list(model_state.keys())}")
 
-        # Now load with the fixed state dict
-        return nn.Module.load_state_dict(self, new_state_dict, strict=False)
+    #     # Now load with the fixed state dict
+    #     return nn.Module.load_state_dict(self, new_state_dict, strict=False)
