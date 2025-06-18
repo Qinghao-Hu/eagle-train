@@ -47,7 +47,7 @@ class Qwen2Model(Qwen2ModelTF):
         self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing
-        self.post_init()
+        # self.post_init()
 
     def forward(
         self,
@@ -164,7 +164,7 @@ class Qwen2ForCausalLMEagle(Qwen2ForCausalLM):
     def __init__(self, config: Qwen2Config) -> None:
         super().__init__(config)
         self.model = Qwen2Model(config)
-        self.post_init()
+        # self.post_init()
 
     def forward(
         self,
