@@ -1,6 +1,5 @@
 export TOKENIZERS_PARALLELISM=true
 export NCCL_DEBUG=WARN
-export WANDB_API_KEY='be32ec2a18acdc347b5d3029742c0ef1090a9e1e'
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TMPDIR=/local/qinghao
 export TRITON_CACHE_DIR=/local/qinghao/triton_cache # Better use a non-NFS path
@@ -12,7 +11,7 @@ BATCH_SIZE=2
 MAX_LEN=4096
 
 BASE_MODEL_PATH=/nobackup/model/llama3.1/$EXPERIMENT_NAME
-DATA_PATH=/nobackup/qinghao/runs/eagle/eagle-data/Eagle-Mix-$EXPERIMENT_NAME
+DATA_PATH=/nobackup/qinghao/dataset/eagle-processed/Eagle-Mix-$EXPERIMENT_NAME
 CKPT_PATH=/nobackup/qinghao/runs/debug/$EXPERIMENT_NAME
 
 deepspeed eagle3_trainer.py \

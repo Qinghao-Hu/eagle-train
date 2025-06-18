@@ -1,8 +1,8 @@
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers import LlamaConfig, LlamaForCausalLM
+from transformers import LlamaConfig
 from transformers.models.llama.modeling_llama import (
     LlamaModel as LlamaModelTF,
     LlamaRotaryEmbedding,
@@ -12,9 +12,9 @@ from transformers.models.llama.modeling_llama import (
 )
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.processing_utils import Unpack
-from transformers.utils import LossKwargs, logging
+from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
@@ -180,8 +180,6 @@ class LlamaModelEagle3(LlamaModelTF):
         hidden_states = self.fc(hidden_states)
 
         batch_size, seq_length, _ = hidden_states.shape
-        seq_length_with_past = seq_length
-        past_key_values_length = 0
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)

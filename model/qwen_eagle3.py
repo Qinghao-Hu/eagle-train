@@ -2,12 +2,13 @@ from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers import LlamaConfig, LlamaForCausalLM
-from transformers.models.llama.modeling_llama import (
-    LlamaDecoderLayer as LlamaDecoderLayerTF,
-    LlamaModel as LlamaModelTF,
-    LlamaRotaryEmbedding,
+from transformers import Qwen2Config, Qwen2ForCausalLM
+from transformers.models.qwen2.modeling_qwen2 import (
+    Qwen2DecoderLayer as Qwen2DecoderLayerTF,
+    Qwen2Model as Qwen2ModelTF,
+    Qwen2RotaryEmbedding,
 )
+
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -17,10 +18,10 @@ from transformers.utils import LossKwargs, logging
 logger = logging.get_logger(__name__)
 
 
-class LlamaDecoderLayer(LlamaDecoderLayerTF):
+class Qwen2DecoderLayer(Qwen2DecoderLayerTF):
     def __init__(
         self,
-        config: LlamaConfig,
+        config: Qwen2Config,
         layer_id: int = 0,
     ) -> None:
         super().__init__(config, layer_id)
@@ -31,8 +32,8 @@ class LlamaDecoderLayer(LlamaDecoderLayerTF):
             self.input_layernorm = nn.Identity()
 
 
-class LlamaModel(LlamaModelTF):
-    def __init__(self, config: LlamaConfig):
+class Qwen2Model(Qwen2ModelTF):
+    def __init__(self, config: Qwen2Config):
         # super().__init__(config)
         nn.Module.__init__(self)
         self.config = config
@@ -40,12 +41,13 @@ class LlamaModel(LlamaModelTF):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([LlamaDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
+        self.layers = nn.ModuleList([Qwen2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.rotary_emb = Qwen2RotaryEmbedding(config=config)
         self.fc = torch.nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
         self.gradient_checkpointing = False
 
-        # self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # Initialize weights and apply final processing
+        self.post_init()
 
     def forward(
         self,
@@ -158,11 +160,11 @@ class LlamaModel(LlamaModelTF):
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
 
 
-class LlamaForCausalLMEagle(LlamaForCausalLM):
-    def __init__(self, config: LlamaConfig) -> None:
+class Qwen2ForCausalLMEagle(Qwen2ForCausalLM):
+    def __init__(self, config: Qwen2Config) -> None:
         super().__init__(config)
-        self.model = LlamaModel(config)
-        # self.post_init()
+        self.model = Qwen2Model(config)
+        self.post_init()
 
     def forward(
         self,

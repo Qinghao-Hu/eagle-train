@@ -109,7 +109,6 @@ class EagleDatasetGenerator:
         num_samples = len(full_dataset)
         samples_to_keep = int(num_samples * ratio)
 
-        # Randomly sample 15% of the indices
         indices = torch.randperm(num_samples)[:samples_to_keep].tolist()
 
         # Select the sampled data
@@ -340,7 +339,7 @@ class EagleDatasetGenerator:
             seq_len = len(input_ids)
 
             # Skip sequences longer than 32K
-            if seq_len > 8192:  # 32768:
+            if seq_len > 32768:
                 dropped_count += 1
                 continue
 
@@ -417,6 +416,3 @@ def main(config):
 
 if __name__ == "__main__":
     main()  # Hydra automatically provides the config parameter
-
-# Example command to run:
-# srun -J eagle_datagen -N 1 --exclusive torchrun --standalone --nnodes=1 --nproc_per_node=8 -m fastrl.trainer.eagle_datagen_sft

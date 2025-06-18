@@ -7,3 +7,5 @@ torchdata
 deepspeed
 wandb
 hydra-core
+torch
+trl

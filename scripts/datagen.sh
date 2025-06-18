@@ -4,12 +4,13 @@
 MODEL_NAME=Llama-3.1-8B-Instruct
 BASE_MODEL_PATH=/nobackup/model/llama3.1/${MODEL_NAME}
 DATA_PATH=/nobackup/qinghao/dataset/eagle-mix
-SAVE_DIR=/nobackup/qinghao/runs/eagle/eagle-data
+SAVE_DIR=/nobackup/qinghao/dataset/eagle-processed/Eagle-Mix-${MODEL_NAME}
 
 torchrun --standalone --nnodes=1 --nproc_per_node=8 eagle_datagen.py \
     model.base_model_path=$BASE_MODEL_PATH \
     data.data_path=$DATA_PATH \
-    data.save_dir=$SAVE_DIR/Eagle-Mix-${MODEL_NAME}
+    data.save_dir=$SAVE_DIR \
+    data.max_length=4096
 
 
 
