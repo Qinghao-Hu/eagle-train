@@ -93,7 +93,7 @@ class LlamaDecoderLayer(nn.Module):
         return outputs
 
 
-class LlamaModel(LlamaModelTF):
+class LlamaModelEagle3(LlamaModelTF):
     def __init__(self, config: LlamaConfig):
         # super().__init__(config)
         nn.Module.__init__(self)
@@ -105,6 +105,13 @@ class LlamaModel(LlamaModelTF):
         self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        self.lm_head = nn.Linear(config.hidden_size, config.draft_vocab_size, bias=False)
+
+        d2t = torch.zeros((config.draft_vocab_size), dtype=torch.long)
+        t2d = torch.zeros((config.vocab_size), dtype=torch.bool)
+        self.register_buffer("d2t", d2t)
+        self.register_buffer("t2d", t2d)
+
         # NOTE: Add a midlayer, fc for Eagle-3
         self.midlayer = LlamaDecoderLayer(config, 0)
         if hasattr(config, "target_hidden_size"):
@@ -113,6 +120,16 @@ class LlamaModel(LlamaModelTF):
             self.fc = torch.nn.Linear(config.hidden_size * 3, config.hidden_size, bias=False)
 
         self.gradient_checkpointing = False
+
+    @torch.no_grad()
+    def _padding(self, tensor, left=True):
+        """Utility function to pad tensors as used in Eagle3"""
+        zeropadding = torch.zeros_like(tensor[:, -1:])
+        if left:
+            tensor = torch.cat((zeropadding, tensor[:, :-1]), dim=1)
+        else:
+            tensor = torch.cat((tensor[:, 1:], zeropadding), dim=1)
+        return tensor
 
     def forward(
         self,
@@ -127,6 +144,10 @@ class LlamaModel(LlamaModelTF):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        # Eagle 3 Args: Test-Time Scaling
+        prediction_length: Optional[int] = 1,
+        target: Optional[torch.Tensor] = None,
+        loss_mask: Optional[torch.Tensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -141,31 +162,26 @@ class LlamaModel(LlamaModelTF):
             logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.")
             use_cache = False
 
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
-
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache()
 
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-            )
+            cache_position = torch.arange(past_seen_tokens, past_seen_tokens + target.shape[1], device=target.device)
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-        )
-
-        # (Qinghao): Modified here
-        inputs_embeds = inputs_embeds.to(base_model_hidden_states.dtype)
         hidden_states = base_model_hidden_states
 
-        if hidden_states.shape[-1] != inputs_embeds.shape[-1]:
-            hidden_states = self.fc(hidden_states)
+        if self.training and self.gradient_checkpointing and not hidden_states.requires_grad:
+            hidden_states.requires_grad = True
+
+        hidden_states = self.fc(hidden_states)
+
+        batch_size, seq_length, _ = hidden_states.shape
+        seq_length_with_past = seq_length
+        past_key_values_length = 0
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -177,203 +193,83 @@ class LlamaModel(LlamaModelTF):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        if self.gradient_checkpointing and self.training:
-            layer_outputs = self._gradient_checkpointing_func(
-                self.midlayer.__call__,
-                inputs_embeds,
-                hidden_states,
-                causal_mask,
-                position_ids,
-                past_key_values,
-                output_attentions,
-                use_cache,
-                cache_position,
-                position_embeddings,
-            )
-        else:
-            layer_outputs = self.midlayer(
-                inputs_embeds,
-                hidden_states,
-                attention_mask=causal_mask,
-                position_ids=position_ids,
-                past_key_value=past_key_values,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                cache_position=cache_position,
-                position_embeddings=position_embeddings,
-                **flash_attn_kwargs,
-            )
+        loss_list = []
+        accuracy_list = []
 
-            hidden_states = layer_outputs[0]
+        for idx in range(prediction_length):
+            inputs_embeds = self.embed_tokens(input_ids)
+            if self.training and self.gradient_checkpointing and not inputs_embeds.requires_grad:
+                inputs_embeds.requires_grad = True
+            inputs_embeds = inputs_embeds.to(base_model_hidden_states.dtype)
 
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+            # Reset cache for each prediction step to prevent accumulation
+            step_past_key_values = DynamicCache() if use_cache else None
 
-        hidden_states = self.norm(hidden_states)
+            if self.gradient_checkpointing and self.training:
+                layer_outputs = self._gradient_checkpointing_func(
+                    self.midlayer.__call__,
+                    inputs_embeds,
+                    hidden_states,
+                    attention_mask,
+                    position_ids,
+                    step_past_key_values,
+                    output_attentions,
+                    use_cache,
+                    cache_position,
+                    position_embeddings,
+                )
+            else:
+                layer_outputs = self.midlayer(
+                    inputs_embeds,
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_value=step_past_key_values,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                    position_embeddings=position_embeddings,
+                    **flash_attn_kwargs,
+                )
 
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
+                hidden_states_out = layer_outputs[0]
 
-        output = BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
-            past_key_values=past_key_values if use_cache else None,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
-        )
-        return output if return_dict else output.to_tuple()
+                if output_attentions:
+                    all_self_attns += (layer_outputs[1],)
 
+            hidden_states = hidden_states_out
+            hidden_states_out = self.norm(hidden_states_out)
 
-class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
+            with torch.no_grad():
+                target_head = target
+                target_max_token = target_head.argmax(-1)
+                target_mask = self.t2d[target_max_token]
+                target_mask = target_mask[..., None].int()
+                position_mask = target_mask * loss_mask
+                target_head = target_head[..., self.t2d]
+                target_head = target_head.float()
+                target_p = nn.Softmax(dim=2)(target_head)
+                target_p = target_p.detach()
 
+            logits = self.lm_head(hidden_states_out)
+            logits = logits.float()
+            out_logp = nn.LogSoftmax(dim=2)(logits)
+            plogp = target_p * out_logp
+            loss = -torch.sum(position_mask * plogp, 2).mean()
+            loss_list.append(loss)
+            with torch.no_grad():
+                accuracy_list.append(
+                    ((logits.argmax(-1) == target_p.argmax(-1)) * position_mask.squeeze(-1)).sum().item()
+                    / (loss_mask.sum().item() + 1e-6)
+                )
 
-class LlamaForCausalLMEagle3(LlamaForCausalLM):
-    def __init__(self, config: LlamaConfig) -> None:
-        super().__init__(config)
-        self.model = LlamaModel(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.draft_vocab_size, bias=False)
-        self.post_init()
+            if idx < prediction_length - 1:
+                input_ids = self._padding(input_ids, left=False)
+                target = self._padding(target, left=False)
+                loss_mask = self._padding(loss_mask, left=False)
+                attention_mask = self._padding(attention_mask, left=False)
 
-        d2t = torch.zeros((config.draft_vocab_size), dtype=torch.long)
-        t2d = torch.zeros((config.vocab_size), dtype=torch.bool)
-        self.register_buffer("d2t", d2t)
-        self.register_buffer("t2d", t2d)
+            # Clean up step cache to prevent accumulation
+            del step_past_key_values
 
-    def forward(
-        self,
-        base_model_hidden_states: torch.Tensor,
-        input_ids: torch.LongTensor = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        logits_to_keep: Union[int, torch.Tensor] = 0,
-        **kwargs: Unpack[KwargsForCausalLM],
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model(
-            base_model_hidden_states=base_model_hidden_states,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            cache_position=cache_position,
-        )
-
-        hidden_states = outputs[0]
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        logits = self.lm_head(hidden_states[:, slice_indices, :])
-
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
-
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
-
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
-
-    # @classmethod
-    # def from_pretrained(cls, pretrained_model_name_or_path, torch_dtype, *model_args, **kwargs):
-    #     # Create model with the provided config
-    #     config = kwargs.get("config", None)
-    #     if config is None:
-    #         raise ValueError("Config must be provided when loading a model from pretrained.")
-
-    #     # Initialize the model with the config
-    #     model = cls(config, *model_args)
-
-    #     # Try to load model weights
-    #     try:
-    #         import os
-    #         from safetensors.torch import load_file as safe_load_file
-    #         import torch
-    #         from transformers.utils import WEIGHTS_NAME, SAFE_WEIGHTS_NAME
-
-    #         # Check if it's a directory or a file path
-    #         if os.path.isdir(pretrained_model_name_or_path):
-    #             safe_path = os.path.join(pretrained_model_name_or_path, SAFE_WEIGHTS_NAME)
-    #             pt_path = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
-
-    #             if os.path.exists(safe_path):
-    #                 logger.info(f"Loading weights from safetensors file: {safe_path}")
-    #                 state_dict = safe_load_file(safe_path)
-    #             elif os.path.exists(pt_path):
-    #                 logger.info(f"Loading weights from PyTorch file: {pt_path}")
-    #                 state_dict = torch.load(pt_path, map_location="cpu")
-    #             else:
-    #                 raise ValueError(f"No model weights found in {pretrained_model_name_or_path}")
-    #         else:
-    #             # Assume it's a direct file path
-    #             if pretrained_model_name_or_path.endswith(".safetensors"):
-    #                 logger.info(f"Loading weights from safetensors file: {pretrained_model_name_or_path}")
-    #                 state_dict = safe_load_file(pretrained_model_name_or_path)
-    #             else:
-    #                 logger.info(f"Loading weights from PyTorch file: {pretrained_model_name_or_path}")
-    #                 state_dict = torch.load(pretrained_model_name_or_path, map_location="cpu")
-
-    #         # Load the state dict into the model
-    #         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-
-    #         if len(missing_keys) > 0:
-    #             logger.warning(f"Missing keys: {missing_keys}")
-    #         if len(unexpected_keys) > 0:
-    #             logger.warning(f"Unexpected keys: {unexpected_keys}")
-
-    #         logger.info("Successfully loaded the weights into the model.")
-    #     except Exception as e:
-    #         logger.warning(f"Error loading state dict: {e}")
-    #         logger.warning("Using model with random initialization.")
-
-    #     return model.to(torch_dtype)
-
-    # def load_state_dict(self, state_dict, strict=True):
-    #     # Fix the state_dict keys to match the expected structure
-    #     new_state_dict = {}
-
-    #     # Print original keys for debugging
-    #     logger.info(f"Original state_dict keys: {list(state_dict.keys())}")
-
-    #     # Handle model prefix for relevant keys
-    #     for key, value in state_dict.items():
-    #         if key in ["embed_tokens.weight", "norm.weight"]:
-    #             new_state_dict[f"model.{key}"] = value
-    #         elif key.startswith("midlayer."):
-    #             new_state_dict[f"model.{key}"] = value
-    #         elif key == "fc.weight":
-    #             new_state_dict["model.fc.weight"] = value
-    #         else:
-    #             new_state_dict[key] = value
-
-    #     # Print modified keys for debugging
-    #     logger.info(f"Modified state_dict keys: {list(new_state_dict.keys())}")
-
-    #     # Get model expected keys for comparison
-    #     model_state = self.state_dict()
-    #     logger.info(f"Model expected keys: {list(model_state.keys())}")
-
-    #     # Now load with the fixed state dict
-    #     return nn.Module.load_state_dict(self, new_state_dict, strict=False)
+        return loss_list, accuracy_list

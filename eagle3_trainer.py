@@ -15,12 +15,22 @@ import torch.distributed as dist
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
-from model.llama_eagle3 import LlamaForCausalLMEagle3
+from model.llama_eagle3 import LlamaModelEagle3
 from utils import Tracking
 
 set_seed(0)
 torch.backends.cuda.matmul.allow_tf32 = True
 logger = logging.getLogger(__file__)
+logger.setLevel(logging.DEBUG)
+
+
+def log_memory_stats(rank, prefix=""):
+    """Log GPU memory statistics for debugging"""
+    if torch.cuda.is_available() and rank == 0:
+        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+        reserved = torch.cuda.memory_reserved() / 1024**3  # GB
+        max_allocated = torch.cuda.max_memory_allocated() / 1024**3  # GB
+        logger.info(f"{prefix} Memory - Allocated: {allocated:.2f}GB, Reserved: {reserved:.2f}GB, Max: {max_allocated:.2f}GB")
 
 
 def add_args():
@@ -37,14 +47,10 @@ def add_args():
     parser.add_argument("--experiment_name", type=str, default="eagle3-deepspeed", help="WandB experiment name")
     parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size per GPU")
-    parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate")
-    parser.add_argument("--warmup_steps", type=int, default=2000, help="Number of warmup steps")
-    parser.add_argument("--grad_clip", type=float, default=0.5, help="Gradient clipping value")
-    parser.add_argument("--value_weight", type=float, default=1.0, help="Weight for value loss")
-    parser.add_argument("--prob_weight", type=float, default=0.1, help="Weight for probability loss")
     parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
     parser.add_argument("--load_optimizer", action="store_true", help="Whether to load optimizer states")
     parser.add_argument("--precision", type=str, default="fp16", choices=["fp16", "bf16"], help="Training precision type")
+    parser.add_argument("--max_len", type=int, default=2048, help="Maximum sequence length")
 
     # Online target model inference support
     parser.add_argument("--use_target_model", action="store_true", help="Use target model to generate hidden states")
@@ -61,10 +67,8 @@ class EagleDataset(Dataset):
     def __init__(
         self,
         datapath,
-        transform=None,
         max_len=2048,
         dataset_max_len=None,
-        hidden_states_idx=None,
         target_model=None,
         tokenizer=None,
         use_target_model=False,
@@ -72,10 +76,8 @@ class EagleDataset(Dataset):
     ):
         """Initialize EagleDataset to load pre-processed data or generate hidden states dynamically"""
         self.datapath = datapath
-        self.transform = transform
         self.max_len = max_len
         self.global_max_seq_len = dataset_max_len
-        self.hidden_states_idx = hidden_states_idx
         self.failed_indices = set()  # Track failed loads
 
         # Target model support
@@ -123,97 +125,71 @@ class EagleDataset(Dataset):
 
         return hidden_states.squeeze(0)  # Remove batch dimension
 
-    def _padding_right(self, tensor, target_length):
-        """Pad tensor to target length on the right"""
-        current_length = tensor.shape[0]
-        if current_length >= target_length:
-            return tensor[:target_length]
-
-        padding_length = target_length - current_length
-        if len(tensor.shape) == 1:
-            padding = torch.zeros(padding_length, dtype=tensor.dtype, device=tensor.device)
-        else:
-            padding_shape = [padding_length] + list(tensor.shape[1:])
-            padding = torch.zeros(padding_shape, dtype=tensor.dtype, device=tensor.device)
-
-        return torch.cat([tensor, padding], dim=0)
-
     def __getitem__(self, idx):
         if idx in self.failed_indices:
             return self.__getitem__((idx + 1) % len(self.datapath))
 
-        try:
-            if self.use_target_model:
-                # Load raw text data for dynamic hidden state generation
-                # Assuming the data files contain text or input_ids
-                if self.datapath[idx].endswith(".json"):
-                    with open(self.datapath[idx], "r") as f:
-                        data = json.load(f)
+        if self.use_target_model:
+            # Load raw text data for dynamic hidden state generation
+            if self.datapath[idx].endswith(".json"):
+                with open(self.datapath[idx], "r") as f:
+                    data = json.load(f)
 
-                    # Expect format: {"text": "...", "input_ids": [...], "attention_mask": [...]}
-                    if "input_ids" in data:
-                        input_ids = torch.tensor(data["input_ids"], dtype=torch.long)
-                        attention_mask = torch.tensor(data.get("attention_mask", [1] * len(input_ids)), dtype=torch.long)
-                    else:
-                        # Tokenize text if only text is provided
-                        text = data.get("text", "")
-                        encoded = self.tokenizer(text, return_tensors="pt", max_length=self.max_len, truncation=True)
-                        input_ids = encoded["input_ids"].squeeze(0)
-                        attention_mask = encoded["attention_mask"].squeeze(0)
-
-                    # Generate loss mask (assuming all tokens contribute to loss for now)
-                    loss_mask = torch.ones_like(input_ids, dtype=torch.float)
-
-                    # Generate hidden states using target model
-                    hidden_states = self._generate_hidden_states(input_ids, attention_mask)
-
+                # Expect format: {"text": "...", "input_ids": [...], "attention_mask": [...]}
+                if "input_ids" in data:
+                    input_ids = torch.tensor(data["input_ids"], dtype=torch.long)
+                    attention_mask = torch.tensor(data.get("attention_mask", [1] * len(input_ids)), dtype=torch.long)
                 else:
-                    # For .pt files, assume they contain input_ids and possibly other data
-                    data = torch.load(self.datapath[idx], weights_only=True)
-                    input_ids = data["input_ids"]
-                    attention_mask = data.get("attention_mask", torch.ones_like(input_ids))
-                    loss_mask = data.get("loss_mask", torch.ones_like(input_ids, dtype=torch.float))
+                    # Tokenize text if only text is provided
+                    text = data.get("text", "")
+                    encoded = self.tokenizer(text, return_tensors="pt", max_length=self.max_len, truncation=True)
+                    input_ids = encoded["input_ids"].squeeze(0)
+                    attention_mask = encoded["attention_mask"].squeeze(0)
 
-                    # Generate hidden states using target model
-                    hidden_states = self._generate_hidden_states(input_ids, attention_mask)
+                # Generate loss mask (assuming all tokens contribute to loss for now)
+                loss_mask = torch.ones_like(input_ids, dtype=torch.float)
 
-                # Prepare target hidden states (shift right by 1 for next-token prediction)
-                target_hidden_states = hidden_states[1:] if len(hidden_states) > 1 else hidden_states
-
-                processed_item = {
-                    "input_ids": input_ids[1:],  # Shift right by 1
-                    "hidden_states": hidden_states[:-1] if len(hidden_states) > 1 else hidden_states,  # Current hidden states
-                    "target": target_hidden_states,  # Target hidden states (shifted)
-                    "loss_mask": loss_mask[1:] if len(loss_mask) > 1 else loss_mask,  # Shift loss mask
-                    "max_seq_len": self.global_max_seq_len,
-                }
+                # Generate hidden states using target model
+                hidden_states = self._generate_hidden_states(input_ids, attention_mask)
 
             else:
-                # Original behavior: load pre-computed hidden states from files
+                # For .pt files, assume they contain input_ids and possibly other data
                 data = torch.load(self.datapath[idx], weights_only=True)
-                data["loss_mask"][-1] = 0
-                all_hidden_states = torch.cat(list(data["hidden_states_dict"].values()), dim=0)
-                hidden_states = all_hidden_states[:-1, :, :]
-                last_hidden_states = all_hidden_states[-1, :, :]
-                processed_item = {
-                    "input_ids": data["input_ids"][1:],
-                    "hidden_states": hidden_states,
-                    "target": hidden_states[:, 1:, :],  # Shift right by 1 for target
-                    "last_hidden_states": last_hidden_states,
-                    "loss_mask": data["loss_mask"],
-                    "max_seq_len": self.global_max_seq_len,
-                }
+                input_ids = data["input_ids"]
+                attention_mask = data.get("attention_mask", torch.ones_like(input_ids))
+                loss_mask = data.get("loss_mask", torch.ones_like(input_ids, dtype=torch.float))
 
-            if self.transform:
-                processed_item = self.transform(processed_item)
+                # Generate hidden states using target model
+                hidden_states = self._generate_hidden_states(input_ids, attention_mask)
 
-            return processed_item
+            processed_item = {
+                "input_ids": input_ids[1:],  # Shift right by 1
+                "hidden_states": hidden_states[:-1] if len(hidden_states) > 1 else hidden_states,  # Current hidden states
+                "loss_mask": loss_mask[1:] if len(loss_mask) > 1 else loss_mask,  # Shift loss mask
+                "max_seq_len": self.global_max_seq_len,
+            }
+        else:
+            # Original behavior: load pre-computed hidden states from files
+            data = torch.load(self.datapath[idx], weights_only=True)
 
-        except Exception as e:
-            self.failed_indices.add(idx)
-            if dist.get_rank() == 0:
-                logger.warning(f"Error loading file {self.datapath[idx]}: {str(e)}")
-            return self.__getitem__((idx + 1) % len(self.datapath))
+            # Skip samples that are longer than max_len
+            if len(data["input_ids"]) > self.max_len:
+                self.failed_indices.add(idx)
+                return self.__getitem__((idx + 1) % len(self.datapath))
+
+            data["loss_mask"][-1] = 0
+            all_hidden_states = list(data["hidden_states_dict"].values())
+            hidden_states = torch.cat(all_hidden_states[:-1], dim=-1).squeeze(0)
+            last_hidden_states = all_hidden_states[-1].squeeze(0)
+            processed_item = {
+                "input_ids": data["input_ids"][1:],
+                "hidden_states": hidden_states,
+                "last_hidden_states": last_hidden_states,
+                "loss_mask": data["loss_mask"],
+                "max_seq_len": self.global_max_seq_len,
+            }
+
+        return processed_item
 
 
 class EagleDataCollator:
@@ -236,13 +212,6 @@ class EagleDataCollator:
             raise ValueError(f"Unsupported tensor shape: {input.shape}")
         return output
 
-        # padding_shape = [B, N - n]
-        # if len(input.shape) > 2:
-        #     padding_shape.append(input.shape[2])
-        # padding_tensor = torch.zeros(padding_shape, dtype=input.dtype, device=input.device)
-        # output = torch.cat((input, padding_tensor), dim=1)
-        # return output
-
     def __call__(self, features):
         # Determine max length from the batch if max_seq_len is not set
         max_length = features[0]["max_seq_len"]
@@ -252,12 +221,13 @@ class EagleDataCollator:
 
         device = features[0]["input_ids"].device
 
+        # Create attention mask that matches the actual input_ids length (not +1)
         batch_attention_mask = torch.cat(
             [
                 torch.cat(
                     [
-                        torch.ones(len(item["input_ids"]) + 1, device=device),
-                        torch.zeros(max_length - len(item["input_ids"]) - 1, device=device),
+                        torch.ones(len(item["input_ids"]), device=device),
+                        torch.zeros(max_length - len(item["input_ids"]), device=device),
                     ]
                 ).unsqueeze(0)
                 for item in features
@@ -265,7 +235,6 @@ class EagleDataCollator:
         )
         batch_input_ids = torch.cat([self.padding_tensor(item["input_ids"], max_length) for item in features])
         batch_hidden_states = torch.cat([self.padding_tensor(item["hidden_states"], max_length) for item in features])
-        batch_target = torch.cat([self.padding_tensor(item["target"], max_length) for item in features])
         batch_loss_mask = torch.cat(
             [
                 torch.cat([item["loss_mask"], torch.zeros(max_length - len(item["loss_mask"]), device=device)]).unsqueeze(0)
@@ -276,7 +245,6 @@ class EagleDataCollator:
         batch = {
             "input_ids": batch_input_ids,
             "hidden_states": batch_hidden_states,
-            "target": batch_target,
             "loss_mask": batch_loss_mask,
             "attention_mask": batch_attention_mask,
         }
@@ -319,7 +287,6 @@ class Eagle3TrainerDeepSpeed:
         self._build_dataloader()
         self._build_model()
         self._initialize_deepspeed()
-
         self._load_checkpoint()
 
         # Initialize loss functions
@@ -408,14 +375,14 @@ class Eagle3TrainerDeepSpeed:
         # Determine model class - only support Llama for Eagle3
         if hasattr(config, "model_type"):
             if config.model_type.lower() == "llama":
-                model_class = LlamaForCausalLMEagle3
+                model_class = LlamaModelEagle3
             # elif config.model_type.lower() == "qwen2":
             #     model_class = Qwen2ForCausalLMEagle
             else:
                 raise ValueError(f"Eagle3 currently only supports Llama models, got: {config.model_type}")
         else:
             if "llama" in self.args.base_model_path.lower():
-                model_class = LlamaForCausalLMEagle3
+                model_class = LlamaModelEagle3
             else:
                 raise ValueError("Eagle3 currently only supports Llama and Qwen models")
 
@@ -424,19 +391,6 @@ class Eagle3TrainerDeepSpeed:
         # Register vocabulary mapping buffers
         self.model.register_buffer("d2t", self.d2t)
         self.model.register_buffer("t2d", self.t2d)
-
-        # Precompute valid t2d mapping for target model if using target model
-        if self.args.use_target_model and self.target_model:
-            target_vocab_size = self.target_model.config.vocab_size
-            if torch.any(self.t2d >= target_vocab_size):
-                if self.rank == 0:
-                    logger.warning(f"t2d contains indices >= target vocab size ({target_vocab_size}). Clamping to valid range.")
-                valid_t2d = torch.clamp(self.t2d, 0, target_vocab_size - 1)
-                self.model.register_buffer("valid_t2d", valid_t2d)
-            else:
-                self.model.register_buffer("valid_t2d", self.t2d)
-        else:
-            self.model.register_buffer("valid_t2d", self.t2d)
 
         # Load embeddings and LM head from base model
         self._load_base_model_weights()
@@ -476,7 +430,7 @@ class Eagle3TrainerDeepSpeed:
             embed_weight = embed_weights["model.embed_tokens.weight"].to(dtype).to(device)
 
         # Copy weights to model (embedding tokens only, not LM head as it has different vocab size)
-        self.model.model.embed_tokens.weight.data.copy_(embed_weight)
+        self.model.embed_tokens.weight.data.copy_(embed_weight)
 
         # For Eagle3, initialize LM head with subset of original LM head weights
         target_vocab_indices = self.model.d2t
@@ -489,7 +443,7 @@ class Eagle3TrainerDeepSpeed:
             self.model.lm_head.weight.data[:available_size].copy_(lm_head_weight[:available_size])
 
         # Freeze embedding layer only (LM head needs to be trained for draft vocabulary)
-        for param in self.model.model.embed_tokens.parameters():
+        for param in self.model.embed_tokens.parameters():
             param.requires_grad = False
 
         if not self.args.use_target_model:
@@ -513,7 +467,7 @@ class Eagle3TrainerDeepSpeed:
         logger.info(f"Searching for data files in: {self.args.data_path}")
 
         # Determine max sequence length from directory name if possible
-        dataset_max_len = 8192  # Default max length
+        dataset_max_len = self.args.max_len  # Default max length
 
         if self.args.use_target_model:
             datapath = []
@@ -615,20 +569,30 @@ class Eagle3TrainerDeepSpeed:
     def _initialize_deepspeed(self):
         parameters = filter(lambda p: p.requires_grad, self.model.parameters())
 
-        # Initialize DeepSpeed engine
+        with open(self.args.deepspeed_config) as f:
+            ds_config = json.load(f)
+
+        ds_config["train_micro_batch_size_per_gpu"] = self.args.batch_size
+        ga_steps = ds_config.get("gradient_accumulation_steps", 1)
+        ds_config["train_batch_size"] = self.args.batch_size * ga_steps * dist.get_world_size()
+        logger.info(
+            f"Overide train_micro_batch_size_per_gpu: {ds_config['train_micro_batch_size_per_gpu']}, train_batch_size: {ds_config['train_batch_size']}"
+        )
+
+        # Initialize DeepSpeed engine - don't pass args to avoid config conflict
         self.model_engine, self.optimizer, self.train_loader, _ = deepspeed.initialize(
-            args=self.args,
             model=self.model,
             model_parameters=parameters,
             training_data=self.train_dataset,
             collate_fn=EagleDataCollator(),
+            config=ds_config,
         )
 
-        # Only initialize base_model_engine when not using target model
         if not self.args.use_target_model and self.base_model_lm_head is not None:
             self.base_model_engine = self.base_model_lm_head.to(dtype=self.model.config.torch_dtype).to(
                 device=f"cuda:{self.local_rank}"
             )
+            self.base_model_engine.requires_grad_(False)
         else:
             self.base_model_engine = None
 
@@ -647,26 +611,6 @@ class Eagle3TrainerDeepSpeed:
             tensor = torch.cat((tensor[:, 1:], zeropadding), dim=1)
         return tensor
 
-    def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
-        """Create causal mask for attention"""
-        combined_attention_mask = None
-        if input_shape[-1] > 1:
-            combined_attention_mask = torch.triu(
-                torch.full(
-                    (input_shape[-1], input_shape[-1]), torch.finfo(inputs_embeds.dtype).min, device=inputs_embeds.device
-                ),
-                diagonal=1,
-            )[None, None, :, :]
-
-        if attention_mask is not None:
-            expanded_attn_mask = attention_mask[:, None, None, :].to(dtype=inputs_embeds.dtype)
-            expanded_attn_mask = (1.0 - expanded_attn_mask) * torch.finfo(inputs_embeds.dtype).min
-            combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
-            )
-
-        return combined_attention_mask
-
     def _compute_loss(self, batch):
         """Compute Eagle3 multi-step prediction losses"""
         input_ids = batch["input_ids"]
@@ -674,16 +618,15 @@ class Eagle3TrainerDeepSpeed:
         last_hidden_states = batch.get("last_hidden_states", None)  # May not exist when use_target_model=True
         loss_mask = batch["loss_mask"]
         attention_mask = batch["attention_mask"]
-
         batch_size, seq_length = input_ids.shape
 
         # Prepare target logits
         with torch.no_grad():
             if self.args.use_target_model and self.target_model:
-                # Generate target logits using target model dynamically
-                # For target model, we need to get the full sequence including the first token
-                # that was shifted out in the dataset
-                # Use bos_token_id if available, otherwise use eos_token_id, otherwise use 1
+                # Clear any existing cache in target model to prevent accumulation
+                if hasattr(self.target_model, "past_key_values"):
+                    self.target_model.past_key_values = None
+
                 if hasattr(self.tokenizer, "bos_token_id") and self.tokenizer.bos_token_id is not None:
                     start_token_id = self.tokenizer.bos_token_id
                 elif hasattr(self.tokenizer, "eos_token_id") and self.tokenizer.eos_token_id is not None:
@@ -703,99 +646,111 @@ class Eagle3TrainerDeepSpeed:
                     dim=1,
                 )
 
-                # Generate target model outputs
+                # Generate target model outputs - explicitly disable cache to prevent accumulation
                 target_outputs = self.target_model(
-                    input_ids=full_input_ids, attention_mask=full_attention_mask, output_hidden_states=True
+                    input_ids=full_input_ids,
+                    attention_mask=full_attention_mask,
+                    output_hidden_states=True,
+                    use_cache=False,  # Explicitly disable cache to prevent memory accumulation
+                    past_key_values=None,  # Ensure no cache is used
                 )
                 target_logits = target_outputs.logits
                 target_logits = target_logits[:, 1:, :]  # Remove first token, align with current sequence
             else:
-                # Use cached hidden states approach (original implementation)
                 if last_hidden_states is None:
                     raise ValueError("last_hidden_states is required when use_target_model=False")
-                last_hidden_states = self._padding(last_hidden_states, left=False)  # Shift right for target
-                # Use model's embedding and lm_head to get target logits
                 target_logits = self.base_model_engine(last_hidden_states.to(dtype=self.model.config.torch_dtype))
+                target_logits = self._padding(target_logits, left=False)
 
-            target_max_token = target_logits.argmax(-1)
+            loss_mask = loss_mask[..., None]
 
-            # Add bounds checking for target_max_token to prevent index out of bounds
-            vocab_size = len(self.model.t2d)
-            if self.rank == 0 and torch.any(target_max_token >= vocab_size):
-                logger.warning(
-                    f"Some target tokens ({torch.max(target_max_token).item()}) exceed t2d vocab size ({vocab_size})"
+        # Move target_logits to same device/dtype before model forward
+        target_logits = target_logits.to(device=hidden_states.device, dtype=self.model.config.torch_dtype)
+
+        loss_list, accuracy_list = self.model_engine(
+            base_model_hidden_states=hidden_states.to(dtype=self.model.config.torch_dtype),
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=False,
+            use_cache=True,
+            prediction_length=self.prediction_length,
+            target=target_logits,
+            loss_mask=loss_mask,
+        )
+
+        # Clean up large tensors to free memory
+        del target_logits
+
+        return loss_list, accuracy_list
+
+    def _validate_epoch(self, epoch, tracking):
+        """Run validation after each training epoch"""
+        if self.rank == 0:
+            logger.info(f"Starting validation for epoch {epoch + 1}")
+
+        # Set model to evaluation mode
+        self.model_engine.eval()
+
+        # Track validation metrics for each prediction step
+        val_loss_list = [[] for _ in range(self.prediction_length)]
+        val_accuracy_list = [[] for _ in range(self.prediction_length)]
+
+        if self.rank == 0:
+            val_iter = tqdm(self.val_loader, desc=f"Validation Epoch {epoch+1}")
+        else:
+            val_iter = self.val_loader
+
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(val_iter):
+                batch = {k: v.cuda() for k, v in batch.items()}
+                batch["hidden_states"] = batch["hidden_states"].to(dtype=self.model.config.torch_dtype)
+
+                loss_list, accuracy_list = self._compute_loss(batch)
+
+                # Store metrics for each prediction step
+                for i in range(len(loss_list)):
+                    val_loss_list[i].append(loss_list[i].item())
+                    val_accuracy_list[i].append(accuracy_list[i])
+
+                if self.rank == 0:
+                    # Show average accuracy in progress bar
+                    avg_acc = sum(accuracy_list) / len(accuracy_list)
+                    val_iter.set_postfix(
+                        {"val_loss": f"{sum([l.item() for l in loss_list]):.4f}", "val_avg_acc": f"{avg_acc:.2%}"}
+                    )
+
+        # Aggregate validation metrics across all processes
+        for i in range(self.prediction_length):
+            # Convert to tensors for distributed reduction
+            avg_val_loss = torch.tensor(val_loss_list[i]).cuda().mean()
+            avg_val_acc = torch.tensor(val_accuracy_list[i]).cuda().mean()
+
+            # All-reduce across processes
+            dist.all_reduce(avg_val_loss, op=dist.ReduceOp.AVG)
+            dist.all_reduce(avg_val_acc, op=dist.ReduceOp.AVG)
+
+            avg_val_loss = avg_val_loss.item()
+            avg_val_acc = avg_val_acc.item()
+
+            # Log validation metrics
+            if self.rank == 0 and tracking:
+                global_step = epoch * len(self.train_loader) + len(self.train_loader) - 1
+                tracking.log(
+                    {
+                        f"val/ploss_{i}": avg_val_loss,
+                        f"val/acc_{i}": avg_val_acc,
+                        f"val/epoch_ploss_{i}": avg_val_loss,
+                        f"val/epoch_acc_{i}": avg_val_acc,
+                    },
+                    step=global_step,
                 )
 
-            # Clamp target_max_token to valid range
-            target_max_token = torch.clamp(target_max_token, 0, vocab_size - 1)
-            target_mask = self.model.t2d[target_max_token]
-            target_mask = target_mask[..., None].int()
-            position_mask = target_mask * loss_mask[..., None]
+                logger.info(
+                    f"Validation Epoch [{epoch + 1}/{self.args.epochs}], Step {i}, pLoss: {avg_val_loss:.4f}, Acc: {avg_val_acc:.2%}"
+                )
 
-            target_logits_mapped = torch.index_select(target_logits, dim=-1, index=self.model.valid_t2d)
-            target_logits_mapped = target_logits_mapped.float()
-            target_p = nn.Softmax(dim=2)(target_logits_mapped).detach()
-
-        # Prepare attention mask
-        causal_mask = self._prepare_decoder_attention_mask(attention_mask, (batch_size, seq_length), hidden_states, 0)
-
-        # Initialize iterative prediction
-        plosses = []
-        acces = []
-        current_hidden = hidden_states.to(dtype=self.model.config.torch_dtype)
-        current_input_ids = input_ids
-        current_target_p = target_p
-        current_position_mask = position_mask
-        current_loss_mask = loss_mask
-
-        # Eagle3 iterative prediction loop
-        for step in range(self.prediction_length):
-            # Get input embeddings
-            inputs_embeds = self.model.model.embed_tokens(current_input_ids)
-            inputs_embeds = inputs_embeds.to(dtype=self.model.config.torch_dtype)
-
-            # Forward pass through Eagle3 model
-            outputs = self.model_engine(
-                base_model_hidden_states=current_hidden,
-                input_ids=current_input_ids,
-                attention_mask=causal_mask,
-                output_hidden_states=True,
-            )
-
-            # Get output hidden states and compute logits
-            predict_hidden = outputs.hidden_states[-1] if hasattr(outputs, "hidden_states") else outputs[0]
-            predict_hidden = self.model.model.norm(predict_hidden)
-            logits = self.model.lm_head(predict_hidden)
-            logits = logits.float()
-
-            # Compute loss for this step
-            out_logp = nn.LogSoftmax(dim=2)(logits)
-            plogp = current_target_p * out_logp
-            step_loss = -torch.sum(current_position_mask * plogp, 2).mean()
-            plosses.append(step_loss)
-
-            # Compute accuracy for this step
-            with torch.no_grad():
-                correct = ((logits.argmax(-1) == current_target_p.argmax(-1)) * current_position_mask.squeeze(-1)).sum().item()
-                total = current_position_mask.sum().item() + 1e-6
-                acces.append(correct / total)
-
-            # Prepare for next iteration (shift everything)
-            if step < self.prediction_length - 1:
-                current_input_ids = self._padding(current_input_ids, left=False)
-                current_target_p = self._padding(current_target_p, left=False)
-                current_position_mask = self._padding(current_position_mask, left=False)
-                current_loss_mask = self._padding(current_loss_mask, left=False)
-                current_hidden = predict_hidden  # Use predicted hidden states for next step
-
-                # Update attention mask for next step
-                step_indices = torch.arange(seq_length, device=attention_mask.device)
-                step_indices_from = step_indices[step:]
-                step_indices_to = step_indices[: seq_length - step]
-                if len(step_indices_from) > 0 and len(step_indices_to) > 0:
-                    causal_mask[:, :, step_indices_from, step_indices_to] = torch.finfo(causal_mask.dtype).min
-
-        return plosses, acces
+        # Set model back to training mode
+        self.model_engine.train()
 
     def train(self):
         if self.rank == 0:
@@ -804,6 +759,8 @@ class Eagle3TrainerDeepSpeed:
             )
         else:
             tracking = None
+
+        log_memory_stats(self.rank, "Training Start")
 
         for epoch in range(self.start_epoch, self.args.epochs):
             self.model_engine.train()
@@ -814,25 +771,26 @@ class Eagle3TrainerDeepSpeed:
                 train_iter = self.train_loader
 
             # Track epoch metrics for each prediction step
-            epoch_plosses = [[] for _ in range(self.prediction_length)]
-            epoch_acces = [[] for _ in range(self.prediction_length)]
+            epoch_loss_list = [[] for _ in range(self.prediction_length)]
+            epoch_accuracy_list = [[] for _ in range(self.prediction_length)]
 
             for batch_idx, batch in enumerate(train_iter):
+                self.model_engine.zero_grad()
                 batch = {k: v.cuda() for k, v in batch.items()}
                 batch["hidden_states"] = batch["hidden_states"].to(dtype=self.model.config.torch_dtype)
 
-                plosses, acces = self._compute_loss(batch)
+                loss_list, accuracy_list = self._compute_loss(batch)
 
-                ploss_weights = [0.8**i for i in range(len(plosses))]
-                total_loss = sum([ploss_weights[i] * plosses[i] for i in range(len(plosses))])
+                loss_weights = [0.8**i for i in range(len(loss_list))]
+                total_loss = sum([loss_weights[i] * loss_list[i] for i in range(len(loss_list))])
 
                 self.model_engine.backward(total_loss)
                 self.model_engine.step()
 
                 # Store metrics for each prediction step
-                for i in range(len(plosses)):
-                    epoch_plosses[i].append(plosses[i].item())
-                    epoch_acces[i].append(acces[i])
+                for i in range(len(loss_list)):
+                    epoch_loss_list[i].append(loss_list[i].item())
+                    epoch_accuracy_list[i].append(accuracy_list[i])
 
                 if self.rank == 0:
                     global_step = epoch * len(self.train_loader) + batch_idx
@@ -843,21 +801,21 @@ class Eagle3TrainerDeepSpeed:
                     }
 
                     # Log metrics for each prediction step
-                    for i in range(len(plosses)):
-                        metrics[f"train/ploss_{i}"] = plosses[i].item()
-                        metrics[f"train/acc_{i}"] = acces[i]
+                    for i in range(len(loss_list)):
+                        metrics[f"train/ploss_{i}"] = loss_list[i].item()
+                        metrics[f"train/acc_{i}"] = accuracy_list[i]
 
                     tracking.log(metrics, step=global_step)
 
                     # Show average accuracy in progress bar
-                    avg_acc = sum(acces) / len(acces)
+                    avg_acc = sum(accuracy_list) / len(accuracy_list)
                     train_iter.set_postfix({"loss": f"{total_loss.item():.4f}", "avg_acc": f"{avg_acc:.2%}", "epoch": epoch})
 
             # Log epoch averages
             if self.rank == 0:
                 for i in range(self.prediction_length):
-                    avg_ploss = sum(epoch_plosses[i]) / len(epoch_plosses[i])
-                    avg_acc = sum(epoch_acces[i]) / len(epoch_acces[i])
+                    avg_ploss = sum(epoch_loss_list[i]) / len(epoch_loss_list[i])
+                    avg_acc = sum(epoch_accuracy_list[i]) / len(epoch_accuracy_list[i])
 
                     logger.info(
                         f"Train Epoch [{epoch + 1}/{self.args.epochs}], Step {i}, pLoss: {avg_ploss:.4f}, Acc: {avg_acc:.2%}"
@@ -868,13 +826,22 @@ class Eagle3TrainerDeepSpeed:
                             f"train/epoch_ploss_{i}": avg_ploss,
                             f"train/epoch_acc_{i}": avg_acc,
                         },
-                        step=epoch,
+                        step=epoch * len(self.train_loader) + len(self.train_loader) - 1,
                     )
+
+            self._validate_epoch(epoch, tracking)
 
             client_state = {
                 "epoch": epoch,
                 "step": epoch * len(self.train_loader) + len(self.train_loader) - 1,
             }
+
+            # Clear cache before checkpoint saving to free memory
+            log_memory_stats(self.rank, f"Before Cleanup Epoch {epoch}")
+            torch.cuda.empty_cache()
+            gc.collect()
+            log_memory_stats(self.rank, f"After Cleanup Epoch {epoch}")
+
             self.model_engine.save_checkpoint(self.args.output_dir, client_state=client_state, exclude_frozen_parameters=False)
 
             if self.rank == 0:
@@ -884,6 +851,10 @@ class Eagle3TrainerDeepSpeed:
 def main():
     parser = add_args()
     args = parser.parse_args()
+
+    # Set environment variables to reduce DeepSpeed verbosity
+    os.environ.setdefault("DEEPSPEED_LOG_LEVEL", "WARNING")
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "warning")
 
     # Initialize distributed training
     deepspeed.init_distributed()

@@ -2,7 +2,7 @@ import torch
 
 # Load frequency map data
 print("Loading frequency map data...")
-mapping_data = torch.load("freq_map/qwen2.5/freq_32768.pt", map_location="cpu")
+mapping_data = torch.load("freq_map/llama3/freq_32768.pt", map_location="cpu")
 freq_d2t = mapping_data.get("d2t", None)
 freq_t2d = mapping_data.get("t2d", None)
 
@@ -26,6 +26,16 @@ for key in model_data.keys():
     if "t2d" in key.lower():
         model_t2d = model_data[key]
         print(f"Found t2d in model: key='{key}', shape={model_t2d.shape}")
+
+# # Save the model mappings
+# cache = {"d2t": model_d2t, "t2d": model_t2d}
+
+# print(f"save model_d2t.pt, size:", len(model_d2t))
+# print(f"d2t tensor shape: {model_d2t.shape}, t2d tensor shape: {model_t2d.shape}")
+
+# with open("freq_map/official_llama3_freq_32000.pt", "wb") as f:
+#     torch.save(cache, f)
+
 
 # If not found directly, list all keys to see what's available
 if model_d2t is None or model_t2d is None:
@@ -58,9 +68,9 @@ if freq_t2d is not None and model_t2d is not None:
         are_equal = torch.equal(freq_t2d, model_t2d)
         print(f"Tensors are equal: {are_equal}")
         if not are_equal:
-            diff = torch.abs(freq_t2d - model_t2d)
-            print(f"Max difference: {diff.max().item()}")
-            print(f"Mean difference: {diff.mean().item()}")
+            diff = freq_t2d ^ model_t2d
+            num_different = diff.sum().item()
+            print(f"Number of different elements: {num_different}")
     else:
         print("Shapes don't match, cannot compare element-wise")
 

@@ -5,15 +5,15 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 export TMPDIR=/local/qinghao
 export TRITON_CACHE_DIR=/local/qinghao/triton_cache # Better use a non-NFS path
 
+PROJECT_NAME=Eagle3
+EXPERIMENT_NAME=Llama-3.1-8B-Instruct
+EPOCHS=40
+BATCH_SIZE=2
+MAX_LEN=4096
 
-PROJECT_NAME=Eagle-Debug-Match
-EXPERIMENT_NAME=FastRL-DS-bf16
-EPOCHS=20
-BATCH_SIZE=4
-
-BASE_MODEL_PATH=/nobackup/model/llama3.1/Llama-3.1-8B-Instruct
-DATA_PATH=/nobackup/qinghao/runs/eagle/eagle-data/Eagle-Mix-Llama-3.1-8B-Instruct
-CKPT_PATH=/nobackup/qinghao/runs/debug  
+BASE_MODEL_PATH=/nobackup/model/llama3.1/$EXPERIMENT_NAME
+DATA_PATH=/nobackup/qinghao/runs/eagle/eagle-data/Eagle-Mix-$EXPERIMENT_NAME
+CKPT_PATH=/nobackup/qinghao/runs/debug/$EXPERIMENT_NAME
 
 deepspeed eagle3_trainer.py \
     --deepspeed_config config/deepspeed_config.json \
@@ -24,6 +24,7 @@ deepspeed eagle3_trainer.py \
     --experiment_name $EXPERIMENT_NAME \
     --batch_size $BATCH_SIZE \
     --epochs $EPOCHS \
-    --precision bf16
+    --precision bf16 \
+    --max_len $MAX_LEN 
 
-# srun -J eagle3 -N 1 --exclusive bash scripts/train_eagle3.sh
+# srun -J eagle3 -N 2 --exclusive bash scripts/train_eagle3.sh
