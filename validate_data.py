@@ -116,7 +116,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Validate PyTorch data files")
-    parser.add_argument("data_path", help="Path to the data directory")
+    parser.add_argument("--data_path", help="Path to the data directory")
     parser.add_argument(
         "--workers", type=int, default=None, help="Number of workers for parallel validation (auto-detect if not specified)"
     )
