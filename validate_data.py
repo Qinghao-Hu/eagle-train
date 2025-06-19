@@ -5,14 +5,12 @@ Script to validate PyTorch data files and identify corrupted ones
 import os
 import torch
 from pathlib import Path
-import multiprocessing as mp
 from tqdm import tqdm
 import logging
-import psutil
 
 
 def validate_single_file(filepath):
-    """Validate a single PyTorch file with memory optimization"""
+    """Validate a single PyTorch file"""
     try:
         # Use memory mapping for large files and set weights_only for security
         data = torch.load(filepath)
@@ -23,39 +21,14 @@ def validate_single_file(filepath):
         return filepath, False, str(e)
 
 
-def get_optimal_workers():
-    """Get optimal number of workers based on system resources"""
-    cpu_count = mp.cpu_count()
-    # Consider memory constraints - PyTorch files can be large
-    available_memory_gb = psutil.virtual_memory().available / (1024**3)
-
-    # Estimate workers based on available memory (assuming ~1GB per worker)
-    memory_based_workers = max(1, int(available_memory_gb * 0.8))
-
-    # Use the minimum of CPU count and memory-based estimate
-    optimal_workers = min(cpu_count, memory_based_workers)
-
-    print(f"System info: {cpu_count} CPUs, {available_memory_gb:.1f}GB available memory")
-    print(f"Recommended workers: {optimal_workers}")
-
-    return optimal_workers
-
-
-def validate_data_directory(data_path, num_workers=None):
+def validate_data_directory(data_path):
     """
     Validate all .pt files in the data directory
 
     Args:
         data_path: Path to the data directory
-        num_workers: Number of parallel workers for validation (auto-detect if None)
     """
     data_path = Path(data_path)
-
-    # Auto-detect optimal workers if not specified
-    if num_workers is None:
-        num_workers = get_optimal_workers()
-
-    print(f"Using {num_workers} worker processes")
 
     # Find all .pt files
     pt_files = list(data_path.rglob("*.pt"))
@@ -75,16 +48,10 @@ def validate_data_directory(data_path, num_workers=None):
 
     corrupted_files = []
 
-    # Validate files in parallel with chunked processing for better memory management
-    chunk_size = max(1, len(pt_files) // (num_workers * 4))  # Process in smaller chunks
+    # Validate files sequentially
+    for filepath in tqdm(pt_files, desc="Validating files"):
+        filepath, is_valid, error = validate_single_file(filepath)
 
-    with mp.Pool(num_workers) as pool:
-        results = list(
-            tqdm(pool.imap(validate_single_file, pt_files, chunksize=chunk_size), total=len(pt_files), desc="Validating files")
-        )
-
-    # Process results
-    for filepath, is_valid, error in results:
         if not is_valid:
             corrupted_files.append((filepath, error))
             logging.error(f"CORRUPTED: {filepath} - {error}")
@@ -116,14 +83,16 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Validate PyTorch data files")
-    parser.add_argument("data_path", help="Path to the data directory")
     parser.add_argument(
-        "--workers", type=int, default=None, help="Number of workers for parallel validation (auto-detect if not specified)"
+        "--data_path",
+        default="/nobackup/qinghao/runs/eagle/eagle-data/Eagle-Mix-Llama-3.1-8B-Instruct",
+        type=str,
+        help="Path to the data directory",
     )
 
     args = parser.parse_args()
 
-    validate_data_directory(args.data_path, args.workers)
+    validate_data_directory(args.data_path)
 
 
 if __name__ == "__main__":
@@ -132,5 +101,4 @@ if __name__ == "__main__":
 
 # Examples:
 # python validate_data.py /nobackup/qinghao/runs/eagle/eagle-data/Eagle-Mix-Llama-3.1-8B-Instruct
-# python validate_data.py /path/to/data --workers 16
-# python validate_data.py /path/to/data --workers $(nproc)
+# python validate_data.py /path/to/data
