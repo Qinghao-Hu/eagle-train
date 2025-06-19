@@ -12,6 +12,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.distributed.device_mesh import init_device_mesh
 from utils import initialize_global_process_group
 
+import glob
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "INFO"))
 
@@ -126,11 +128,11 @@ class EagleDatasetGenerator:
             # Handle HuggingFace dataset
             if "conversations" in ds.column_names:
                 # Process conversations field
-                for item in ds:
+                for item in tqdm(ds, desc=f"[Rank{self.rank}] Processing conversations", position=self.rank):
                     self.process_conversation_item(item)
             elif "messages" in ds.column_names:
                 # Process messages field
-                for item in ds:
+                for item in tqdm(ds, desc=f"[Rank{self.rank}] Processing messages", position=self.rank):
                     if isinstance(item["messages"], list):
                         messages = []
                         for msg in item["messages"]:
@@ -141,11 +143,11 @@ class EagleDatasetGenerator:
                             self.create_conversation_entry(messages)
             elif all(field in ds.column_names for field in ["prompt", "response"]):
                 # Handle simple prompt/response pairs
-                for item in ds:
+                for item in tqdm(ds, desc=f"[Rank{self.rank}] Processing prompt/response pairs", position=self.rank):
                     self.format_conversation(item["prompt"], item["response"])
         else:
             # Handle list of items
-            for item in ds:
+            for item in tqdm(ds, desc=f"[Rank{self.rank}] Processing list of items", position=self.rank):
                 if isinstance(item, dict):
                     if "conversations" in item:
                         self.process_conversation_item(item)
