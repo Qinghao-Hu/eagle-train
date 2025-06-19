@@ -170,8 +170,10 @@ class EagleDataset(Dataset):
                 "max_seq_len": self.global_max_seq_len,
             }
         else:
-            # Original behavior: load pre-computed hidden states from files
-            data = torch.load(self.datapath[idx], weights_only=True)
+            try:
+                data = torch.load(self.datapath[idx], weights_only=True)
+            except Exception as e:
+                return self.__getitem__((idx + 1) % len(self.datapath))
 
             # Skip samples that are longer than max_len
             if len(data["input_ids"]) > self.max_len:
