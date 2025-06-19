@@ -12,6 +12,8 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from torch.distributed.device_mesh import init_device_mesh
 from utils import initialize_global_process_group
 
+import glob
+
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "INFO"))
 
@@ -101,7 +103,11 @@ class EagleDatasetGenerator:
 
         # Try to load the dataset with appropriate format detection
         logger.info(f"Loading dataset from {datapath}")
-        full_dataset = load_from_disk(datapath)
+        parquet_files = glob.glob(os.path.join(datapath, "data", "*.parquet"))
+        if parquet_files:
+            full_dataset = load_dataset("parquet", data_files=parquet_files, split="train")
+        else:
+            full_dataset = load_from_disk(datapath)
         # full_dataset = load_dataset("parquet", data_files=f"{datapath}/data/train-00000-of-00038.parquet")["train"]
 
         # Calculate number of samples
@@ -122,11 +128,11 @@ class EagleDatasetGenerator:
             # Handle HuggingFace dataset
             if "conversations" in ds.column_names:
                 # Process conversations field
-                for item in ds:
+                for item in tqdm(ds, desc=f"[Rank{self.rank}] Processing conversations", position=self.rank):
                     self.process_conversation_item(item)
             elif "messages" in ds.column_names:
                 # Process messages field
-                for item in ds:
+                for item in tqdm(ds, desc=f"[Rank{self.rank}] Processing messages", position=self.rank):
                     if isinstance(item["messages"], list):
                         messages = []
                         for msg in item["messages"]:
@@ -137,11 +143,11 @@ class EagleDatasetGenerator:
                             self.create_conversation_entry(messages)
             elif all(field in ds.column_names for field in ["prompt", "response"]):
                 # Handle simple prompt/response pairs
-                for item in ds:
+                for item in tqdm(ds, desc=f"[Rank{self.rank}] Processing prompt/response pairs", position=self.rank):
                     self.format_conversation(item["prompt"], item["response"])
         else:
             # Handle list of items
-            for item in ds:
+            for item in tqdm(ds, desc=f"[Rank{self.rank}] Processing list of items", position=self.rank):
                 if isinstance(item, dict):
                     if "conversations" in item:
                         self.process_conversation_item(item)
@@ -335,6 +341,12 @@ class EagleDatasetGenerator:
 
         for i, data_point in pbar:
             orig_idx = self.worker_indices[i]
+            
+            output_path = os.path.join(self.save_dir, f"data_{orig_idx}.pt")
+            if os.path.exists(output_path):
+                print(f"Skipping data_{orig_idx} because it already exists")
+                continue
+            
             input_ids = data_point["input_ids"]
             seq_len = len(input_ids)
 
@@ -372,7 +384,7 @@ class EagleDatasetGenerator:
             }
 
             # Save directly to save_dir
-            output_path = os.path.join(self.save_dir, f"data_{orig_idx}.pt")
+            # output_path = os.path.join(self.save_dir, f"data_{orig_idx}.pt")
             torch.save(processed_data, output_path)
 
             # Update progress bar postfix with sequence length info
