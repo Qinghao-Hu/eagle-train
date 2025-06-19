@@ -16,7 +16,7 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 
 from model.llama_eagle import LlamaForCausalLMEagle
-from model.qwen_eagle import Qwen2ForCausalLMEagle
+from model.qwen2_eagle import Qwen2ForCausalLMEagle
 from utils import Tracking
 
 set_seed(0)

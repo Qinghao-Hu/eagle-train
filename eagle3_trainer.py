@@ -17,6 +17,8 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
 from model.llama_eagle3 import LlamaModelEagle3
+from model.qwen2_eagle3 import Qwen2ModelEagle3
+from model.qwen3_eagle3 import Qwen3ModelEagle3
 from utils import Tracking
 
 set_seed(0)
@@ -379,13 +381,19 @@ class Eagle3TrainerDeepSpeed:
         if hasattr(config, "model_type"):
             if config.model_type.lower() == "llama":
                 model_class = LlamaModelEagle3
-            # elif config.model_type.lower() == "qwen2":
-            #     model_class = Qwen2ForCausalLMEagle
+            elif config.model_type.lower() == "qwen2":
+                model_class = Qwen2ModelEagle3
+            elif config.model_type.lower() == "qwen3":
+                model_class = Qwen3ModelEagle3
             else:
                 raise ValueError(f"Eagle3 currently only supports Llama models, got: {config.model_type}")
         else:
             if "llama" in self.args.base_model_path.lower():
                 model_class = LlamaModelEagle3
+            elif "qwen2" in self.args.base_model_path.lower():
+                model_class = Qwen2ModelEagle3
+            elif "qwen3" in self.args.base_model_path.lower():
+                model_class = Qwen3ModelEagle3
             else:
                 raise ValueError("Eagle3 currently only supports Llama and Qwen models")
 

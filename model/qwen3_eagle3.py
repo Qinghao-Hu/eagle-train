@@ -2,14 +2,13 @@ from typing import Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers import Qwen2Config
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2DecoderLayer as Qwen2DecoderLayerTF,
-    Qwen2Model as Qwen2ModelTF,
-    Qwen2RotaryEmbedding,
-    Qwen2MLP,
-    Qwen2Attention,
-    Qwen2RMSNorm,
+from transformers.models.qwen3.modeling_qwen3 import (
+    Qwen3Model as Qwen3ModelTF,
+    Qwen3RotaryEmbedding,
+    Qwen3MLP,
+    Qwen3Attention,
+    Qwen3RMSNorm,
+    Qwen3Config,
 )
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
@@ -20,15 +19,15 @@ from transformers.utils import logging
 logger = logging.get_logger(__name__)
 
 
-class Qwen2DecoderLayer(nn.Module):
-    def __init__(self, config: Qwen2Config, layer_idx: int):
+class Qwen3DecoderLayer(nn.Module):
+    def __init__(self, config: Qwen3Config, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
 
-        self.self_attn = Qwen2Attention(config=config, layer_idx=layer_idx)
+        self.self_attn = Qwen3Attention(config=config, layer_idx=layer_idx)
 
-        # NOTE: Override the qkv projection for Eagle-3
+        # NOTE: Override the qkv projection for Eagle-3, Qwen 3 disenables bias by default
         self.self_attn.q_proj = nn.Linear(
             config.hidden_size * 2, config.num_attention_heads * self.head_dim, bias=config.attention_bias
         )
@@ -39,12 +38,12 @@ class Qwen2DecoderLayer(nn.Module):
             config.hidden_size * 2, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
         )
 
-        self.mlp = Qwen2MLP(config)
-        self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = Qwen3MLP(config)
+        self.input_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # NOTE: Add a hidden_norm for Eagle-3
-        self.hidden_norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.hidden_norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -94,8 +93,8 @@ class Qwen2DecoderLayer(nn.Module):
         return outputs
 
 
-class Qwen2ModelEagle3(Qwen2ModelTF):
-    def __init__(self, config: Qwen2Config):
+class Qwen3ModelEagle3(Qwen3ModelTF):
+    def __init__(self, config: Qwen3Config):
         # super().__init__(config)
         nn.Module.__init__(self)
         self.config = config
@@ -103,8 +102,8 @@ class Qwen2ModelEagle3(Qwen2ModelTF):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.rotary_emb = Qwen2RotaryEmbedding(config=config)
-        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.rotary_emb = Qwen3RotaryEmbedding(config=config)
+        self.norm = Qwen3RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.lm_head = nn.Linear(config.hidden_size, config.draft_vocab_size, bias=False)
 
@@ -114,7 +113,7 @@ class Qwen2ModelEagle3(Qwen2ModelTF):
         self.register_buffer("t2d", t2d)
 
         # NOTE: Add a midlayer, fc for Eagle-3
-        self.midlayer = Qwen2DecoderLayer(config, 0)
+        self.midlayer = Qwen3DecoderLayer(config, 0)
         if hasattr(config, "target_hidden_size"):
             self.fc = torch.nn.Linear(config.target_hidden_size * 3, config.hidden_size, bias=False)
         else:

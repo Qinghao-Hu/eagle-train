@@ -30,30 +30,17 @@ huggingface-cli download Qinghao/eagle-mix --repo-type dataset --local-dir /path
 
 ## Dataset Statistics (Llama-3.1 Tokenizer)
 
-Create mixed dataset from the following datasets:
-
-| Dataset | Count | Mean | Median | Max |
-|---------|--------|-------|---------|-----|
-| ShareGPT | 68,623 | 6,128 | 6,445 | 93,262 |
-| UltraChat | 207,865 | 5,686 | 5,230 | 53,213 |
-| OpenThoughts2-1M | 1,143,205 | 16,175 | 10,859 | 996,361 |
-
-
-Of course. Here is the data from the two images converted into a single Markdown table:
-
-| Statistic | ShareGPT (tokens) | UltraChat (tokens) |
-| :--- | :--- | :--- |
-| Count | 68,623 | 207,865 |
-| Min | 2 | 46 |
-| Max | 33,297 | 4,050 |
-| Mean | 1358.46 | 1145.86 |
-| Median | 1504.00 | 1054.00 |
-| Std Dev | 811.21 | 565.94 |
-| 25th percentile | 609.00 | 738.00 |
-| 75th percentile | 2012.00 | 1462.00 |
-| 90th percentile | 2221.00 | 1887.00 |
-| 95th percentile | 2349.00 | 2177.00 |
-| 99th percentile | 2708.78 | 3000.00 |
+| Statistic | OpenThoughts2 | ShareGPT | UltraChat |
+| :--- | :--- | :--- | :--- |
+| Count | 1,143,205 | 68,623 | 207,865 |
+| Min | 45 | 2 | 46 |
+| Max | 57,796 | 33,297 | 4,050 |
+| Mean | 4968.10 | 1358.46 | 1145.86 |
+| Median | 3512.00 | 1504.00 | 1054.00 |
+| 25th percentile | 1958.00 | 609.00 | 738.00 |
+| 75th percentile | 6544.00 | 2012.00 | 1462.00 |
+| 90th percentile | 11042.00 | 2221.00 | 1887.00 |
+| 99th percentile | 19631.00 | 2708.78 | 3000.00 |
 
 
 ```bash
