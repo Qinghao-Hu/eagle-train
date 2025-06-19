@@ -86,6 +86,13 @@ srun -J datagen -N 1 --exclusive bash scripts/datagen.sh
 
 You can change -N to modify the number of nodes.
 
+
+! Before training, you need to remove the corrupted files.
+```bash
+python validate_data.py
+while read file; do rm "$file"; done < corrupted_files.txt
+```
+
 ```bash
 srun -J eagle3 -N 2 --exclusive bash scripts/train_eagle3.sh
 ```
