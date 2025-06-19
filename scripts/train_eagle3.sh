@@ -11,10 +11,21 @@ BATCH_SIZE=2
 MAX_LEN=4096
 
 BASE_MODEL_PATH=/nobackup/model/llama3.1/$EXPERIMENT_NAME
-DATA_PATH=/nobackup/qinghao/dataset/eagle-processed/Eagle-Mix-$EXPERIMENT_NAME
+# DATA_PATH=/nobackup/qinghao/dataset/eagle-processed/Eagle-Mix-$EXPERIMENT_NAME
+DATA_PATH=/nobackup/qinghao/runs/eagle/eagle-data/Eagle-Mix-Llama-3.1-8B-Instruct
 CKPT_PATH=/nobackup/qinghao/runs/debug/$EXPERIMENT_NAME
 
-deepspeed eagle3_trainer.py \
+
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export MASTER_PORT=12355
+export WORLD_SIZE=$SLURM_NTASKS
+export RANK=$SLURM_PROCID
+
+echo "MASTER_ADDR="$MASTER_ADDR
+
+torchrun --nnodes=$SLURM_JOB_NUM_NODES --nproc_per_node=8 --master_port=$MASTER_PORT \
+    --master_addr $MASTER_ADDR --node_rank=$SLURM_PROCID \
+    eagle3_trainer.py \
     --deepspeed_config config/deepspeed_config.json \
     --base_model_path $BASE_MODEL_PATH \
     --data_path $DATA_PATH \
@@ -26,4 +37,4 @@ deepspeed eagle3_trainer.py \
     --precision bf16 \
     --max_len $MAX_LEN 
 
-# srun -J eagle3 -N 2 --exclusive bash scripts/train_eagle3.sh
+# srun -J eagle3 -N 4 --exclusive bash scripts/train_eagle3.sh
