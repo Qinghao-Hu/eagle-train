@@ -14,6 +14,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from model.llama_eagle3 import LlamaModelEagle3
 from utils import Tracking
@@ -522,6 +523,7 @@ class Eagle3TrainerDeepSpeed:
         train_size = int(len(datapath) * 0.95)
         train_files = datapath[:train_size]
         val_files = datapath[train_size:]
+        print(f"train_size: {train_size}, val_size: {len(val_files)}")
 
         # Create datasets with proper parameters
         self.train_dataset = EagleDataset(
@@ -596,9 +598,19 @@ class Eagle3TrainerDeepSpeed:
         else:
             self.base_model_engine = None
 
+        val_sampler = DistributedSampler(
+            self.val_dataset, num_replicas=dist.get_world_size(), rank=dist.get_rank(), shuffle=False
+        )
+
         # Create validation dataloader
         self.val_loader = DataLoader(
-            self.val_dataset, batch_size=self.args.batch_size, shuffle=False, collate_fn=EagleDataCollator(), num_workers=4
+            self.val_dataset,
+            batch_size=self.args.batch_size * 2,
+            shuffle=False,
+            collate_fn=EagleDataCollator(),
+            num_workers=4,
+            sampler=val_sampler,
+            pin_memory=True,
         )
 
     @torch.no_grad()

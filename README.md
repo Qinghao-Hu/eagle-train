@@ -28,7 +28,7 @@ huggingface-cli download Qinghao/eagle-mix --repo-type dataset --local-dir /path
 
 [Skip following]
 
-## Dataset Statistics
+## Dataset Statistics (Llama-3.1 Tokenizer)
 
 Create mixed dataset from the following datasets:
 
@@ -37,6 +37,24 @@ Create mixed dataset from the following datasets:
 | ShareGPT | 68,623 | 6,128 | 6,445 | 93,262 |
 | UltraChat | 207,865 | 5,686 | 5,230 | 53,213 |
 | OpenThoughts2-1M | 1,143,205 | 16,175 | 10,859 | 996,361 |
+
+
+Of course. Here is the data from the two images converted into a single Markdown table:
+
+| Statistic | ShareGPT (tokens) | UltraChat (tokens) |
+| :--- | :--- | :--- |
+| Count | 68,623 | 207,865 |
+| Min | 2 | 46 |
+| Max | 33,297 | 4,050 |
+| Mean | 1358.46 | 1145.86 |
+| Median | 1504.00 | 1054.00 |
+| Std Dev | 811.21 | 565.94 |
+| 25th percentile | 609.00 | 738.00 |
+| 75th percentile | 2012.00 | 1462.00 |
+| 90th percentile | 2221.00 | 1887.00 |
+| 95th percentile | 2349.00 | 2177.00 |
+| 99th percentile | 2708.78 | 3000.00 |
+
 
 ```bash
 python create_dataset/create_mixed_dataset.py
