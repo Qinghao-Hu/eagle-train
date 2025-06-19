@@ -30,13 +30,18 @@ huggingface-cli download Qinghao/eagle-mix --repo-type dataset --local-dir /path
 
 ## Dataset Statistics (Llama-3.1 Tokenizer)
 
-Create mixed dataset from the following datasets:
+| Statistic | OpenThoughts2 | ShareGPT | UltraChat |
+| :--- | :--- | :--- | :--- |
+| Count | 1,143,205 | 68,623 | 207,865 |
+| Min | 45 | 2 | 46 |
+| Max | 57,796 | 33,297 | 4,050 |
+| Mean | 4968.10 | 1358.46 | 1145.86 |
+| Median | 3512.00 | 1504.00 | 1054.00 |
+| 25th percentile | 1958.00 | 609.00 | 738.00 |
+| 75th percentile | 6544.00 | 2012.00 | 1462.00 |
+| 90th percentile | 11042.00 | 2221.00 | 1887.00 |
+| 99th percentile | 19631.00 | 2708.78 | 3000.00 |
 
-| Dataset | Count | Mean | Median | Max |
-|---------|--------|-------|---------|-----|
-| ShareGPT | 68,623 | 6,128 | 6,445 | 93,262 |
-| UltraChat | 207,865 | 5,686 | 5,230 | 53,213 |
-| OpenThoughts2-1M | 1,143,205 | 16,175 | 10,859 | 996,361 |
 
 
 Of course. Here is the data from the two images converted into a single Markdown table:
@@ -85,6 +90,13 @@ srun -J datagen -N 1 --exclusive bash scripts/datagen.sh
 # Step 4: Train
 
 You can change -N to modify the number of nodes.
+
+
+! Before training, you need to remove the corrupted files.
+```bash
+python validate_data.py
+while read file; do rm "$file"; done < corrupted_files.txt
+```
 
 ```bash
 srun -J eagle3 -N 2 --exclusive bash scripts/train_eagle3.sh
