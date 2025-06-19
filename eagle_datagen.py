@@ -335,6 +335,12 @@ class EagleDatasetGenerator:
 
         for i, data_point in pbar:
             orig_idx = self.worker_indices[i]
+            
+            output_path = os.path.join(self.save_dir, f"data_{orig_idx}.pt")
+            if os.path.exists(output_path):
+                print(f"Skipping data_{orig_idx} because it already exists")
+                continue
+            
             input_ids = data_point["input_ids"]
             seq_len = len(input_ids)
 
@@ -372,7 +378,7 @@ class EagleDatasetGenerator:
             }
 
             # Save directly to save_dir
-            output_path = os.path.join(self.save_dir, f"data_{orig_idx}.pt")
+            # output_path = os.path.join(self.save_dir, f"data_{orig_idx}.pt")
             torch.save(processed_data, output_path)
 
             # Update progress bar postfix with sequence length info
