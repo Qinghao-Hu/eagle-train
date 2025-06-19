@@ -101,7 +101,11 @@ class EagleDatasetGenerator:
 
         # Try to load the dataset with appropriate format detection
         logger.info(f"Loading dataset from {datapath}")
-        full_dataset = load_from_disk(datapath)
+        parquet_files = glob.glob(os.path.join(datapath, "data", "*.parquet"))
+        if parquet_files:
+            full_dataset = load_dataset("parquet", data_files=parquet_files, split="train")
+        else:
+            full_dataset = load_from_disk(datapath)
         # full_dataset = load_dataset("parquet", data_files=f"{datapath}/data/train-00000-of-00038.parquet")["train"]
 
         # Calculate number of samples
