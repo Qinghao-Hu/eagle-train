@@ -419,26 +419,46 @@ class Eagle3TrainerDeepSpeed:
 
         try:
             # Try loading from safetensors first
-            with open(os.path.join(base_path, "model.safetensors.index.json"), "r") as f:
-                index_json = json.loads(f.read())
-                try:    # Some models have tie-embed
-                    head_path = index_json["weight_map"]["lm_head.weight"]
-                except:
-                    head_path = None
-                embed_path = index_json["weight_map"]["model.embed_tokens.weight"]
+            safetensors_index_path = os.path.join(base_path, "model.safetensors.index.json")
+            if os.path.exists(safetensors_index_path):
+                with open(safetensors_index_path, "r") as f:
+                    index_json = json.loads(f.read())
+                    try:    # Some models have tie-embed
+                        head_path = index_json["weight_map"]["lm_head.weight"]
+                    except:
+                        head_path = None
+                    embed_path = index_json["weight_map"]["model.embed_tokens.weight"]
 
-            with safe_open(os.path.join(base_path, embed_path), framework="pt", device=device) as f:
-                tensor_slice = f.get_slice("model.embed_tokens.weight")
-                vocab_size, hidden_dim = tensor_slice.get_shape()
-                embed_weight = tensor_slice[:, :hidden_dim].to(dtype)
-
-            if head_path is not None:
-                with safe_open(os.path.join(base_path, head_path), framework="pt", device=device) as f:
-                    tensor_slice = f.get_slice("lm_head.weight")
+                with safe_open(os.path.join(base_path, embed_path), framework="pt", device=device) as f:
+                    tensor_slice = f.get_slice("model.embed_tokens.weight")
                     vocab_size, hidden_dim = tensor_slice.get_shape()
-                    lm_head_weight = tensor_slice[:, :hidden_dim].to(dtype)
+                    embed_weight = tensor_slice[:, :hidden_dim].to(dtype)
+
+                if head_path is not None:
+                    with safe_open(os.path.join(base_path, head_path), framework="pt", device=device) as f:
+                        tensor_slice = f.get_slice("lm_head.weight")
+                        vocab_size, hidden_dim = tensor_slice.get_shape()
+                        lm_head_weight = tensor_slice[:, :hidden_dim].to(dtype)
+                else:
+                    lm_head_weight = embed_weight.clone()
             else:
-                lm_head_weight = embed_weight.clone()
+                # Single safetensors file case
+                safetensors_files = [f for f in os.listdir(base_path) if f.endswith(".safetensors") and not f.endswith(".index.json")]
+                if safetensors_files:
+                    single_file = safetensors_files[0]
+                    with safe_open(os.path.join(base_path, single_file), framework="pt", device=device) as f:
+                        tensor_slice = f.get_slice("model.embed_tokens.weight")
+                        vocab_size, hidden_dim = tensor_slice.get_shape()
+                        embed_weight = tensor_slice[:, :hidden_dim].to(dtype)
+                        
+                        # Try to get lm_head.weight, fallback to embed_weight if not found
+                        try:
+                            tensor_slice = f.get_slice("lm_head.weight")
+                            lm_head_weight = tensor_slice[:, :hidden_dim].to(dtype)
+                        except:
+                            lm_head_weight = embed_weight.clone()
+                else:
+                    raise FileNotFoundError("No safetensors files found")
 
         except:
             # Fallback to pytorch model files
