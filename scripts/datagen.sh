@@ -1,10 +1,12 @@
 # srun -J datagen -N 1 --exclusive bash scripts/datagen.sh
 
 
-MODEL_NAME=Llama-3.1-8B-Instruct
-BASE_MODEL_PATH=/nobackup/model/llama3.1/${MODEL_NAME}
-DATA_PATH=/nobackup/qinghao/dataset/eagle-mix
-SAVE_DIR=/nobackup/qinghao/dataset/eagle-processed/Eagle-Mix-${MODEL_NAME}
+BASE_MODEL_PATH=${1}
+MODEL_NAME=$(basename $BASE_MODEL_PATH)
+echo "BASE_MODEL_PATH="$BASE_MODEL_PATH
+echo "MODEL_NAME="$MODEL_NAME
+DATA_PATH=/home/jerguo/dataset/datasets/tlt/eagle-mix
+SAVE_DIR=/home/jerguo/dataset/datasets/tlt/eagle-processed/Eagle-Mix-${MODEL_NAME}
 
 torchrun --standalone --nnodes=1 --nproc_per_node=8 eagle_datagen.py \
     model.base_model_path=$BASE_MODEL_PATH \

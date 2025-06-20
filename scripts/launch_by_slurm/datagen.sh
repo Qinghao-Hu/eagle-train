@@ -4,7 +4,7 @@ source ~/.bashrc
 source activate eagle
 which python
 
-cd /home/shangy/TLT/eagle-train/
+cd /home/jerguo/projects/tlt-workspace/eagle-train/
 
 master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_ADDR=${master_addr:-"127.0.0.1"}
@@ -20,8 +20,9 @@ n_node=$SLURM_JOB_NUM_NODES
 
 BASE_MODEL_PATH=${1}
 MODEL_NAME=$(basename $BASE_MODEL_PATH)
-
+echo "MODEL_NAME="$MODEL_NAME
 BASE_DATA_PATH=${2}
+echo "BASE_DATA_PATH="$BASE_DATA_PATH
 DATA_PATH=${BASE_DATA_PATH}/eagle-mix
 SAVE_DIR=${BASE_DATA_PATH}/eagle-processed/Eagle-Mix-${MODEL_NAME}
 
