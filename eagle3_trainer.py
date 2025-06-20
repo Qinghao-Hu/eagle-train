@@ -54,6 +54,7 @@ def add_args():
     parser.add_argument("--load_optimizer", action="store_true", help="Whether to load optimizer states")
     parser.add_argument("--precision", type=str, default="fp16", choices=["fp16", "bf16"], help="Training precision type")
     parser.add_argument("--max_len", type=int, default=2048, help="Maximum sequence length")
+    parser.add_argument("--save_steps", type=int, default=None, help="Save checkpoint every N steps. If None, save every epoch.")
 
     # Online target model inference support
     parser.add_argument("--use_target_model", action="store_true", help="Use target model to generate hidden states")
@@ -271,6 +272,7 @@ class Eagle3TrainerDeepSpeed:
         self.rank = dist.get_rank()
         self.world_size = dist.get_world_size()
         self.start_epoch = 0  # Track starting epoch for resume
+        self.start_step = 0  # Track starting step for resume
         self.prediction_length = args.prediction_length
 
         # Load vocabulary mapping
@@ -350,15 +352,17 @@ class Eagle3TrainerDeepSpeed:
                 load_module_only=False,
             )
 
-            self.start_epoch = client_state["epoch"] + 1
-            steps_per_epoch = len(self.train_loader)
-            self.start_epoch = client_state["step"] // steps_per_epoch + 1
+            if client_state:
+                self.start_epoch = client_state["epoch"]
+                self.start_step = client_state["step"]
 
-            if self.rank == 0:
-                logger.info(f"Successfully loaded checkpoint from: {load_path}")
-                logger.info(f"Resuming training from epoch {self.start_epoch}")
-                if client_state:
+                if self.rank == 0:
+                    logger.info(f"Successfully loaded checkpoint from: {load_path}")
+                    logger.info(f"Resuming training from epoch {self.start_epoch} and step {self.start_step}")
                     logger.info(f"Client state keys: {list(client_state.keys())}")
+            else:
+                if self.rank == 0:
+                    logger.info(f"Loaded checkpoint from {load_path}, but no client_state found. Starting from scratch.")
 
     def _build_model(self):
         # Load model config
@@ -796,7 +800,12 @@ class Eagle3TrainerDeepSpeed:
             epoch_loss_list = [[] for _ in range(self.prediction_length)]
             epoch_accuracy_list = [[] for _ in range(self.prediction_length)]
 
+            steps_per_epoch = len(self.train_loader)
             for batch_idx, batch in enumerate(train_iter):
+                global_step = epoch * steps_per_epoch + batch_idx
+                if global_step < self.start_step:
+                    continue
+
                 self.model_engine.zero_grad()
                 batch = {k: v.cuda() for k, v in batch.items()}
                 batch["hidden_states"] = batch["hidden_states"].to(dtype=self.model.config.torch_dtype)
@@ -815,7 +824,6 @@ class Eagle3TrainerDeepSpeed:
                     epoch_accuracy_list[i].append(accuracy_list[i])
 
                 if self.rank == 0:
-                    global_step = epoch * len(self.train_loader) + batch_idx
                     metrics = {
                         "train/total_loss": total_loss.item(),
                         "train/lr": self.optimizer.param_groups[0]["lr"],
@@ -832,6 +840,20 @@ class Eagle3TrainerDeepSpeed:
                     # Show average accuracy in progress bar
                     avg_acc = sum(accuracy_list) / len(accuracy_list)
                     train_iter.set_postfix({"loss": f"{total_loss.item():.4f}", "avg_acc": f"{avg_acc:.2%}", "epoch": epoch})
+
+                # Checkpointing logic
+                if self.args.save_steps and (global_step + 1) % self.args.save_steps == 0:
+                    client_state = {
+                        "epoch": epoch,
+                        "step": global_step + 1,
+                    }
+                    log_memory_stats(self.rank, f"Before Cleanup Step {global_step + 1}")
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    log_memory_stats(self.rank, f"After Cleanup Step {global_step + 1}")
+                    self.model_engine.save_checkpoint(self.args.output_dir, client_state=client_state, exclude_frozen_parameters=False)
+                    if self.rank == 0:
+                        logger.info(f"Checkpoint saved at step {global_step + 1}")
 
             # Log epoch averages
             if self.rank == 0:
@@ -853,21 +875,22 @@ class Eagle3TrainerDeepSpeed:
 
             self._validate_epoch(epoch, tracking)
 
-            client_state = {
-                "epoch": epoch,
-                "step": epoch * len(self.train_loader) + len(self.train_loader) - 1,
-            }
+            if not self.args.save_steps:
+                client_state = {
+                    "epoch": epoch + 1,
+                    "step": (epoch + 1) * len(self.train_loader),
+                }
 
-            # Clear cache before checkpoint saving to free memory
-            log_memory_stats(self.rank, f"Before Cleanup Epoch {epoch}")
-            torch.cuda.empty_cache()
-            gc.collect()
-            log_memory_stats(self.rank, f"After Cleanup Epoch {epoch}")
+                # Clear cache before checkpoint saving to free memory
+                log_memory_stats(self.rank, f"Before Cleanup Epoch {epoch}")
+                torch.cuda.empty_cache()
+                gc.collect()
+                log_memory_stats(self.rank, f"After Cleanup Epoch {epoch}")
 
-            self.model_engine.save_checkpoint(self.args.output_dir, client_state=client_state, exclude_frozen_parameters=False)
+                self.model_engine.save_checkpoint(self.args.output_dir, client_state=client_state, exclude_frozen_parameters=False)
 
-            if self.rank == 0:
-                logger.info(f"Checkpoint saved at epoch {epoch}: {self.args.output_dir}")
+                if self.rank == 0:
+                    logger.info(f"Checkpoint saved at epoch {epoch}: {self.args.output_dir}")
 
 
 def main():
