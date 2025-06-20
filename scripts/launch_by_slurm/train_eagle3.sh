@@ -51,6 +51,6 @@ torchrun --nnodes=$SLURM_JOB_NUM_NODES --nproc_per_node=8 --master_port=25001 \
     --epochs $EPOCHS \
     --precision bf16 \
     --max_len $MAX_LEN \
-    --save_steps 10
+    --save_steps 8000
 
 # srun -J eagle3 -N 4 --exclusive bash scripts/train_eagle3.sh

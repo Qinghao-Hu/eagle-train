@@ -3,7 +3,6 @@
 Script to validate PyTorch data files and identify corrupted ones
 """
 import os
-import torch
 from pathlib import Path
 import multiprocessing as mp
 from tqdm import tqdm
@@ -13,8 +12,11 @@ import psutil
 
 def validate_single_file(filepath):
     """Validate a single PyTorch file with memory optimization"""
+    import torch
+
     try:
         # Use memory mapping for large files and set weights_only for security
+        # Loading to CPU is safer in multiprocessing workers
         data = torch.load(filepath)
         # Explicitly delete to free memory immediately
         # del data
@@ -78,16 +80,29 @@ def validate_data_directory(data_path, num_workers=None):
     # Validate files in parallel with chunked processing for better memory management
     chunk_size = max(1, len(pt_files) // (num_workers * 4))  # Process in smaller chunks
 
-    with mp.Pool(num_workers) as pool:
-        results = list(
-            tqdm(pool.imap(validate_single_file, pt_files, chunksize=chunk_size), total=len(pt_files), desc="Validating files")
-        )
-
-    # Process results
-    for filepath, is_valid, error in results:
-        if not is_valid:
-            corrupted_files.append((filepath, error))
-            logging.error(f"CORRUPTED: {filepath} - {error}")
+    # If only one worker is specified, run in a single process to simplify debugging
+    if num_workers > 1:
+        # Use a single loop to process results as they become available
+        # This avoids collecting all results in memory and can prevent deadlocks
+        with mp.Pool(num_workers) as pool:
+            # Using imap_unordered can be faster as we process results as soon as they are ready
+            pbar = tqdm(
+                pool.imap_unordered(validate_single_file, pt_files, chunksize=chunk_size),
+                total=len(pt_files),
+                desc="Validating files",
+            )
+            for filepath, is_valid, error in pbar:
+                if not is_valid:
+                    corrupted_files.append((filepath, error))
+                    logging.error(f"CORRUPTED: {filepath} - {error}")
+    else:
+        print("Running in single-process mode for debugging.")
+        pbar = tqdm(pt_files, desc="Validating files")
+        for file in pbar:
+            filepath, is_valid, error = validate_single_file(file)
+            if not is_valid:
+                corrupted_files.append((filepath, error))
+                logging.error(f"CORRUPTED: {filepath} - {error}")
 
     # Summary
     print(f"\n=== VALIDATION SUMMARY ===")
