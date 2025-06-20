@@ -14,8 +14,11 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from model.llama_eagle3 import LlamaModelEagle3
+from model.qwen2_eagle3 import Qwen2ModelEagle3
+from model.qwen3_eagle3 import Qwen3ModelEagle3
 from utils import Tracking
 
 set_seed(0)
@@ -169,8 +172,10 @@ class EagleDataset(Dataset):
                 "max_seq_len": self.global_max_seq_len,
             }
         else:
-            # Original behavior: load pre-computed hidden states from files
-            data = torch.load(self.datapath[idx], weights_only=True)
+            try:
+                data = torch.load(self.datapath[idx], weights_only=True)
+            except Exception as e:
+                return self.__getitem__((idx + 1) % len(self.datapath))
 
             # Skip samples that are longer than max_len
             if len(data["input_ids"]) > self.max_len:
@@ -376,13 +381,19 @@ class Eagle3TrainerDeepSpeed:
         if hasattr(config, "model_type"):
             if config.model_type.lower() == "llama":
                 model_class = LlamaModelEagle3
-            # elif config.model_type.lower() == "qwen2":
-            #     model_class = Qwen2ForCausalLMEagle
+            elif config.model_type.lower() == "qwen2":
+                model_class = Qwen2ModelEagle3
+            elif config.model_type.lower() == "qwen3":
+                model_class = Qwen3ModelEagle3
             else:
                 raise ValueError(f"Eagle3 currently only supports Llama models, got: {config.model_type}")
         else:
             if "llama" in self.args.base_model_path.lower():
                 model_class = LlamaModelEagle3
+            elif "qwen2" in self.args.base_model_path.lower():
+                model_class = Qwen2ModelEagle3
+            elif "qwen3" in self.args.base_model_path.lower():
+                model_class = Qwen3ModelEagle3
             else:
                 raise ValueError("Eagle3 currently only supports Llama and Qwen models")
 
@@ -522,6 +533,7 @@ class Eagle3TrainerDeepSpeed:
         train_size = int(len(datapath) * 0.95)
         train_files = datapath[:train_size]
         val_files = datapath[train_size:]
+        print(f"train_size: {train_size}, val_size: {len(val_files)}")
 
         # Create datasets with proper parameters
         self.train_dataset = EagleDataset(
@@ -596,9 +608,19 @@ class Eagle3TrainerDeepSpeed:
         else:
             self.base_model_engine = None
 
+        val_sampler = DistributedSampler(
+            self.val_dataset, num_replicas=dist.get_world_size(), rank=dist.get_rank(), shuffle=False
+        )
+
         # Create validation dataloader
         self.val_loader = DataLoader(
-            self.val_dataset, batch_size=self.args.batch_size, shuffle=False, collate_fn=EagleDataCollator(), num_workers=4
+            self.val_dataset,
+            batch_size=self.args.batch_size * 2,
+            shuffle=False,
+            collate_fn=EagleDataCollator(),
+            num_workers=4,
+            sampler=val_sampler,
+            pin_memory=True,
         )
 
     @torch.no_grad()
