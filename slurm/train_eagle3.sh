@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH -A nvr_elm_llm                  #account
-#SBATCH -p "backfill,high_prio,batch,batch_short"                        #partition
-#SBATCH -t 02:00:00                     #wall time limit, hr:min:sec
-#SBATCH -N 4                            #number of nodes
+#SBATCH -p batch,interactive            #partition
+#SBATCH -t 04:00:00                     #wall time limit, hr:min:sec
+#SBATCH -N 2                           #number of nodes
 #SBATCH --mem=0                         # all mem avail
 #SBATCH --gres=gpu:8
 #SBATCH -J nvr_elm_llm-tlt-eagle        #job name
+#SBATCH --array=1-20%1
 #SBATCH --exclusive #important: need to make it exclusive to improve speed
 
 
@@ -21,8 +22,7 @@ HNAME=$(echo $(scontrol show hostname))
 
 echo "[$HNAME] | $PROGRESS | $WORKDIR | Running Jobs"
 
-BASE_MODEL_PATH=${1} #/home/jerguo/dataset/llama3.1/Llama-3.1-8B-Instruct
-cmd="/home/jerguo/projects/tlt-workspace/eagle-train/scripts/launch_by_slurm/datagen.sh $BASE_MODEL_PATH /home/jerguo/dataset/datasets/tlt"
+cmd="/home/shangy/TLT/eagle-train/scripts/launch_by_slurm/train_eagle3.sh /home/shangy/TLT/models/Qwen/Qwen2.5-3B-Instruct /home/shangy/TLT/dataset"
 
 srun \
     -o $OUTFILE -e $ERRFILE \

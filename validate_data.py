@@ -3,7 +3,6 @@
 Script to validate PyTorch data files and identify corrupted ones
 """
 import os
-import torch
 from pathlib import Path
 from tqdm import tqdm
 import logging
@@ -13,6 +12,7 @@ def validate_single_file(filepath):
     """Validate a single PyTorch file"""
     try:
         # Use memory mapping for large files and set weights_only for security
+        # Loading to CPU is safer in multiprocessing workers
         data = torch.load(filepath)
         # Explicitly delete to free memory immediately
         # del data

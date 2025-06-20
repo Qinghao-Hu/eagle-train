@@ -122,4 +122,7 @@ slurm/*.out
 
 outputs
 
-slurm/slurm-logs
+
+# Slurm
+slurm-logs/
+slurm*.out
