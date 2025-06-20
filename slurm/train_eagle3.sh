@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A nvr_elm_llm                  #account
-#SBATCH -p batch_block1,interactive                 #partition
+#SBATCH -p batch_block1                 #partition
 #SBATCH -t 04:00:00                     #wall time limit, hr:min:sec
 #SBATCH -N 2                           #number of nodes
 #SBATCH --mem=0                         # all mem avail
