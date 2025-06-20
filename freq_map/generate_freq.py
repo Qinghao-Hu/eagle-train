@@ -1,6 +1,6 @@
 # Modified from https://github.com/thunlp/FR-Spec/blob/main/fr/fr.py
 
-from datasets import load_from_disk
+from datasets import load_dataset, load_from_disk
 from transformers import AutoTokenizer, AutoConfig
 from collections import Counter
 from tqdm import tqdm
@@ -10,6 +10,8 @@ import os
 import logging
 import multiprocessing
 from functools import partial
+
+import glob
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -201,7 +203,11 @@ class TokenizationProcessor:
 
 
 def main(args):
-    ds = load_from_disk(args.dataset_path)
+    parquet_files = glob.glob(os.path.join(args.dataset_path, "data", "*.parquet"))
+    if parquet_files:
+        ds = load_dataset("parquet", data_files=parquet_files, split="train")
+    else:
+        ds = load_from_disk(args.dataset_path)
     # ds = ds.select(range(1000))
 
     # Convert dataset to list for multiprocessing
