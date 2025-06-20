@@ -373,6 +373,7 @@ class Eagle3TrainerDeepSpeed:
 
         # Add Eagle3 specific config
         config.draft_vocab_size = self.args.draft_vocab_size
+        config.tie_word_embeddings = False
 
         # Configure target hidden size based on target model layers
         if self.args.use_target_model and self.target_model:
@@ -420,29 +421,43 @@ class Eagle3TrainerDeepSpeed:
             # Try loading from safetensors first
             with open(os.path.join(base_path, "model.safetensors.index.json"), "r") as f:
                 index_json = json.loads(f.read())
-                head_path = index_json["weight_map"]["lm_head.weight"]
+                try:    # Some models have tie-embed
+                    head_path = index_json["weight_map"]["lm_head.weight"]
+                except:
+                    head_path = None
                 embed_path = index_json["weight_map"]["model.embed_tokens.weight"]
-
-            with safe_open(os.path.join(base_path, head_path), framework="pt", device=device) as f:
-                tensor_slice = f.get_slice("lm_head.weight")
-                vocab_size, hidden_dim = tensor_slice.get_shape()
-                lm_head_weight = tensor_slice[:, :hidden_dim].to(dtype)
 
             with safe_open(os.path.join(base_path, embed_path), framework="pt", device=device) as f:
                 tensor_slice = f.get_slice("model.embed_tokens.weight")
                 vocab_size, hidden_dim = tensor_slice.get_shape()
                 embed_weight = tensor_slice[:, :hidden_dim].to(dtype)
+
+            if head_path is not None:
+                with safe_open(os.path.join(base_path, head_path), framework="pt", device=device) as f:
+                    tensor_slice = f.get_slice("lm_head.weight")
+                    vocab_size, hidden_dim = tensor_slice.get_shape()
+                    lm_head_weight = tensor_slice[:, :hidden_dim].to(dtype)
+            else:
+                lm_head_weight = embed_weight.clone()
+
         except:
             # Fallback to pytorch model files
             with open(os.path.join(base_path, "pytorch_model.bin.index.json"), "r") as f:
                 index_json = json.loads(f.read())
-                head_path = index_json["weight_map"]["lm_head.weight"]
+                try:    # Some models have tie-embed
+                    head_path = index_json["weight_map"]["lm_head.weight"]
+                except:
+                    head_path = None
                 embed_path = index_json["weight_map"]["model.embed_tokens.weight"]
-
-            head_weights = torch.load(os.path.join(base_path, head_path))
+            
             embed_weights = torch.load(os.path.join(base_path, embed_path))
-            lm_head_weight = head_weights["lm_head.weight"].to(dtype).to(device)
             embed_weight = embed_weights["model.embed_tokens.weight"].to(dtype).to(device)
+
+            if head_path is not None:
+                head_weights = torch.load(os.path.join(base_path, head_path))
+                lm_head_weight = head_weights["lm_head.weight"].to(dtype).to(device)
+            else:
+                lm_head_weight = embed_weight.clone().to(dtype).to(device)
 
         # Copy weights to model (embedding tokens only, not LM head as it has different vocab size)
         self.model.embed_tokens.weight.data.copy_(embed_weight)

@@ -26,6 +26,30 @@ DATA_PATH=${BASE_DATA_PATH}/eagle-processed/Eagle-Mix-${MODEL_NAME}
 CKPT_PATH=/home/shangy/TLT/EAGLE_CKPTS/$EXPERIMENT_NAME
 
 
+FREQ_MAP_PATH="freq_map/$MODEL_NAME/freq_32768.pt"
+
+# Detect if the FREQ_MAP_PATH is valid
+if [ ! -f "$FREQ_MAP_PATH" ]; then
+    echo "FREQ_MAP_PATH: $FREQ_MAP_PATH does not exist, using default freq_map_path"
+    # Determine freq_map_path from BASE_MODEL_PATH
+    if [[ "$BASE_MODEL_PATH" == *"Llama-3"* ]]; then
+        FREQ_MAP_PATH="freq_map/llama3/freq_32768.pt"
+    elif [[ "$BASE_MODEL_PATH" == *"Qwen2.5"* ]]; then
+        FREQ_MAP_PATH="freq_map/qwen2.5/freq_32768.pt"
+    elif [[ "$BASE_MODEL_PATH" == *"Qwen3"* ]]; then
+        FREQ_MAP_PATH="freq_map/qwen3/freq_32768.pt"
+    else
+        echo "Could not determine model type from BASE_MODEL_PATH for freq_map_path"
+        exit 1
+    fi
+fi
+
+
+
+echo "Using FREQ_MAP_PATH: $FREQ_MAP_PATH"
+
+
+
 master_addr=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_ADDR=${master_addr:-"127.0.0.1"}
 export CURRENT_RANK=${SLURM_PROCID:-"0"}
@@ -51,6 +75,7 @@ torchrun --nnodes=$SLURM_JOB_NUM_NODES --nproc_per_node=8 --master_port=25001 \
     --epochs $EPOCHS \
     --precision bf16 \
     --max_len $MAX_LEN \
-    --save_steps 8000
+    --save_steps 8000 \
+    --freq_map_path $FREQ_MAP_PATH
 
 # srun -J eagle3 -N 4 --exclusive bash scripts/train_eagle3.sh
