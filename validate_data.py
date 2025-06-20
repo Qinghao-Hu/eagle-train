@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from tqdm import tqdm
 import logging
+import torch
 
 
 def validate_single_file(filepath):
