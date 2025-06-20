@@ -4,7 +4,7 @@ source ~/.bashrc
 source activate eagle
 which python
 
-cd /home/shangy/TLT/eagle-train/
+cd /home/jerguo/projects/tlt-workspace/eagle-train
 
 export TOKENIZERS_PARALLELISM=true
 export NCCL_DEBUG=WARN
@@ -23,7 +23,7 @@ EXPERIMENT_NAME=${MODEL_NAME}
 
 BASE_DATA_PATH=${2}
 DATA_PATH=${BASE_DATA_PATH}/eagle-processed/Eagle-Mix-${MODEL_NAME}
-CKPT_PATH=/home/shangy/TLT/EAGLE_CKPTS/$EXPERIMENT_NAME
+CKPT_PATH=/home/jerguo/runs/tlt/eagle-checkpoints/$EXPERIMENT_NAME
 
 
 FREQ_MAP_PATH="freq_map/$MODEL_NAME/freq_32768.pt"
