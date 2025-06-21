@@ -9,8 +9,10 @@ cd /home/jerguo/projects/tlt-workspace/eagle-train
 export TOKENIZERS_PARALLELISM=true
 export NCCL_DEBUG=WARN
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
-# export TMPDIR=/home/shangy/TLT/TMP
-# export TRITON_CACHE_DIR=/home/shangy/TLT/TMP/triton_cache # Better use a non-NFS path
+export TMPDIR=/local/jerguo/tlt/tmp
+export TRITON_CACHE_DIR=/local/jerguo/tlt/tmp/triton_cache # Better use a non-NFS path
+
+mkdir -p /local/jerguo/tlt/tmp/triton_cache
 
 PROJECT_NAME=Eagle3
 EPOCHS=40
@@ -75,7 +77,7 @@ torchrun --nnodes=$SLURM_JOB_NUM_NODES --nproc_per_node=8 --master_port=25001 \
     --epochs $EPOCHS \
     --precision bf16 \
     --max_len $MAX_LEN \
-    --save_steps 8000 \
+    --save_steps 4000 \
     --freq_map_path $FREQ_MAP_PATH
 
 # srun -J eagle3 -N 4 --exclusive bash scripts/train_eagle3.sh

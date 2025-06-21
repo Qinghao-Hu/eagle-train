@@ -3,8 +3,10 @@
 export TOKENIZERS_PARALLELISM=true
 export NCCL_DEBUG=WARN
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
-# export TMPDIR=/local/qinghao
-# export TRITON_CACHE_DIR=/local/qinghao/triton_cache # Better use a non-NFS path
+export TMPDIR=/local/jerguo/tlt/tmp
+export TRITON_CACHE_DIR=/local/jerguo/tlt/tmp/triton_cache # Better use a non-NFS path
+
+mkdir -p /local/jerguo/tlt/tmp/triton_cache
 
 PROJECT_NAME=Eagle3
 EPOCHS=40
