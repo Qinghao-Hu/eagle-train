@@ -3,6 +3,9 @@
 # Sequential training script for running train_512K.sh multiple times
 # Each run uses internal checkpointing/restore functionality
 # Jobs continue sequentially even if previous job times out or fails
+# Now supports passing arguments to the target script
+
+# NUM_RUNS=2 SCRIPT_PATH=./train_eagle3.sh bash run_sequential_jobs.sh /home/jerguo/dataset/qwen2.5/Qwen2.5-1.5B
 
 set -e
 
@@ -13,15 +16,20 @@ SCRIPT_PATH=${SCRIPT_PATH:-"./train_512K.sh"}
 # Check if train_512K.sh exists
 if [ ! -f "$SCRIPT_PATH" ]; then
     echo "Error: $SCRIPT_PATH not found!"
-    echo "Usage: NUM_RUNS=3 SCRIPT_PATH=./my_script.sh $0"
+    echo "Usage: NUM_RUNS=3 SCRIPT_PATH=./my_script.sh $0 [script_args...]"
+    echo "Example: NUM_RUNS=3 SCRIPT_PATH=./train_512K.sh $0 /path/to/model /path/to/data --batch_size 4"
     exit 1
 fi
+
+# Get script arguments (everything after the script name)
+SCRIPT_ARGS=("$@")
 
 # Array to store job IDs
 declare -a JOB_IDS=()
 
 echo "Starting sequential training with $NUM_RUNS runs..."
 echo "Script: $SCRIPT_PATH"
+echo "Script arguments: ${SCRIPT_ARGS[*]}"
 echo "Note: Using internal checkpointing - each run continues from previous checkpoint"
 echo "Note: Jobs will continue even if previous job times out or fails"
 echo "==========================================="
@@ -32,10 +40,10 @@ for ((i=1; i<=NUM_RUNS; i++)); do
     
     if [ $i -eq 1 ]; then
         # First job - no dependency
-        JOB_OUTPUT=$(sbatch "$SCRIPT_PATH")
+        JOB_OUTPUT=$(sbatch "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}")
     else
         # Subsequent jobs depend on previous job completion (regardless of exit status)
-        JOB_OUTPUT=$(sbatch --dependency=afterany:${JOB_IDS[-1]} "$SCRIPT_PATH")
+        JOB_OUTPUT=$(sbatch --dependency=afterany:${JOB_IDS[-1]} "$SCRIPT_PATH" "${SCRIPT_ARGS[@]}")
     fi
     
     JOB_ID=$(echo "$JOB_OUTPUT" | grep -o '[0-9]\+$')
