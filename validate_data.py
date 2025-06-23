@@ -7,6 +7,7 @@ from pathlib import Path
 from tqdm import tqdm
 import logging
 import torch
+from multiprocessing import Pool, cpu_count
 
 
 def validate_single_file(filepath):
@@ -22,40 +23,62 @@ def validate_single_file(filepath):
         return filepath, False, str(e)
 
 
+# def validate_data_directory(data_path):
+#     """
+#     Validate all .pt files in the data directory
+
+#     Args:
+#         data_path: Path to the data directory
+#     """
+#     data_path = Path(data_path)
+
+#     # Find all .pt files
+#     pt_files = list(data_path.rglob("*.pt"))
+
+#     if not pt_files:
+#         print(f"No .pt files found in {data_path}")
+#         return
+
+#     print(f"Found {len(pt_files)} .pt files to validate")
+
+#     # Setup logging
+#     logging.basicConfig(
+#         level=logging.INFO,
+#         format="%(asctime)s - %(levelname)s - %(message)s",
+#         handlers=[logging.FileHandler("data_validation.log"), logging.StreamHandler()],
+#     )
+
+#     corrupted_files = []
+
+#     # Validate files sequentially
+#     for filepath in tqdm(pt_files, desc="Validating files"):
+#         filepath, is_valid, error = validate_single_file(filepath)
+
+#         if not is_valid:
+#             corrupted_files.append((filepath, error))
+#             logging.error(f"CORRUPTED: {filepath} - {error}")
+
 def validate_data_directory(data_path):
-    """
-    Validate all .pt files in the data directory
-
-    Args:
-        data_path: Path to the data directory
-    """
     data_path = Path(data_path)
-
-    # Find all .pt files
     pt_files = list(data_path.rglob("*.pt"))
-
     if not pt_files:
         print(f"No .pt files found in {data_path}")
         return
-
     print(f"Found {len(pt_files)} .pt files to validate")
-
-    # Setup logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[logging.FileHandler("data_validation.log"), logging.StreamHandler()],
     )
-
     corrupted_files = []
-
-    # Validate files sequentially
-    for filepath in tqdm(pt_files, desc="Validating files"):
-        filepath, is_valid, error = validate_single_file(filepath)
-
+    # Use multiprocessing Pool
+    with Pool(processes=cpu_count()) as pool:
+        results = list(tqdm(pool.imap_unordered(validate_single_file, pt_files), total=len(pt_files)))
+    for filepath, is_valid, error in results:
         if not is_valid:
             corrupted_files.append((filepath, error))
             logging.error(f"CORRUPTED: {filepath} - {error}")
+    # Summary remains the same...
 
     # Summary
     print(f"\n=== VALIDATION SUMMARY ===")
