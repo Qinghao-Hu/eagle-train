@@ -7,13 +7,12 @@ export TRITON_CACHE_DIR=/local/qinghao/triton_cache # Better use a non-NFS path
 PROJECT_NAME=Eagle3
 EXPERIMENT_NAME=Llama-3.1-8B-Instruct
 EPOCHS=40
-BATCH_SIZE=2
-MAX_LEN=4096
+BATCH_SIZE=4
+MAX_LEN=2048
 
 BASE_MODEL_PATH=/nobackup/model/llama3.1/$EXPERIMENT_NAME
-# DATA_PATH=/nobackup/qinghao/dataset/eagle-processed/Eagle-Mix-$EXPERIMENT_NAME
-DATA_PATH=/nobackup/qinghao/runs/eagle/eagle-data/Eagle-Mix-Llama-3.1-8B-Instruct
-CKPT_PATH=/nobackup/qinghao/runs/debug/$EXPERIMENT_NAME
+DATA_PATH=/nobackup/qinghao/dataset/eagle-processed/Eagle-Mix-$EXPERIMENT_NAME
+CKPT_PATH=/nobackup/qinghao/runs/debug/$EXPERIMENT_NAME-New
 
 
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
@@ -37,4 +36,4 @@ torchrun --nnodes=$SLURM_JOB_NUM_NODES --nproc_per_node=8 --master_port=$MASTER_
     --precision bf16 \
     --max_len $MAX_LEN 
 
-# srun -J eagle3 -N 4 --exclusive bash scripts/train_eagle3.sh
+# srun -J eagle3 -N 1 --exclusive bash scripts/train_eagle3.sh
