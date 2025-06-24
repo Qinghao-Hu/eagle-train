@@ -84,49 +84,78 @@ def analyze_openthoughts_structure(dataset, num_samples=5):
 
 def extract_conversation_text(sample, dataset_type):
     """Extract conversation text from a sample based on dataset type"""
+    text_parts = []
+
     if dataset_type == "sharegpt":
-        if "conversations" in sample:
+        if "conversations" in sample and sample["conversations"]:
             # Join all conversation turns
-            text_parts = []
             for turn in sample["conversations"]:
-                if isinstance(turn, dict) and "value" in turn:
-                    text_parts.append(turn["value"])
-            return " ".join(text_parts)
-        elif "text" in sample:
-            return sample["text"]
+                if isinstance(turn, dict) and "value" in turn and turn["value"]:
+                    text_parts.append(str(turn["value"]))
+        elif "text" in sample and sample["text"]:
+            return str(sample["text"])
 
     elif dataset_type == "ultrachat":
-        if "messages" in sample:
+        if "messages" in sample and sample["messages"]:
             # Join all message content
-            text_parts = []
             for msg in sample["messages"]:
-                if isinstance(msg, dict) and "content" in msg:
-                    text_parts.append(msg["content"])
-            return " ".join(text_parts)
-        elif "text" in sample:
-            return sample["text"]
+                if isinstance(msg, dict) and "content" in msg and msg["content"]:
+                    text_parts.append(str(msg["content"]))
+        elif "text" in sample and sample["text"]:
+            return str(sample["text"])
 
     elif dataset_type == "openthoughts":
-        if "messages" in sample:
-            # Join all message content
-            text_parts = []
-            for msg in sample["messages"]:
-                if isinstance(msg, dict) and "content" in msg:
-                    text_parts.append(msg["content"])
-            return " ".join(text_parts)
-        elif "text" in sample:
-            return sample["text"]
-        elif "conversation" in sample:
-            return sample["conversation"]
+        # Try multiple possible field names for OpenThoughts dataset
+        possible_fields = ["messages", "conversation", "text", "conversations"]
 
-    # Fallback - try to find any text field
-    for key in sample.keys():
-        if "text" in key.lower() or "content" in key.lower():
-            value = sample[key]
+        for field in possible_fields:
+            if field in sample and sample[field]:
+                if field == "messages" and isinstance(sample[field], list):
+                    # Handle messages format
+                    for msg in sample[field]:
+                        if isinstance(msg, dict):
+                            # Try different content field names
+                            for content_field in ["content", "text", "message", "value"]:
+                                if content_field in msg and msg[content_field]:
+                                    text_parts.append(str(msg[content_field]))
+                                    break
+                        elif isinstance(msg, str):
+                            text_parts.append(str(msg))
+                    if text_parts:
+                        break
+                elif isinstance(sample[field], str):
+                    return str(sample[field])
+                elif isinstance(sample[field], list) and sample[field] and isinstance(sample[field][0], str):
+                    text_parts = [str(x) for x in sample[field] if x]
+                    break
+
+    # If we found text parts, join them
+    if text_parts:
+        return " ".join(text_parts)
+
+    # Fallback - try to find any text field with more comprehensive search
+    for key, value in sample.items():
+        if value and (
+            "text" in key.lower()
+            or "content" in key.lower()
+            or "message" in key.lower()
+            or "conversation" in key.lower()
+            or "dialogue" in key.lower()
+        ):
             if isinstance(value, str):
-                return value
-            elif isinstance(value, list) and value and isinstance(value[0], str):
-                return " ".join(value)
+                return str(value)
+            elif isinstance(value, list):
+                if value and isinstance(value[0], str):
+                    return " ".join(str(x) for x in value if x)
+                elif value and isinstance(value[0], dict):
+                    # Try to extract text from list of dictionaries
+                    for item in value:
+                        if isinstance(item, dict):
+                            for content_field in ["content", "text", "message", "value"]:
+                                if content_field in item and item[content_field]:
+                                    text_parts.append(str(item[content_field]))
+                    if text_parts:
+                        return " ".join(text_parts)
 
     return ""
 
@@ -134,6 +163,24 @@ def extract_conversation_text(sample, dataset_type):
 def calculate_sequence_statistics(lengths, dataset_name):
     """Calculate comprehensive statistics for sequence lengths"""
     lengths = np.array(lengths)
+
+    # Handle empty arrays
+    if len(lengths) == 0:
+        print(f"Warning: No valid samples found for {dataset_name}")
+        return {
+            "dataset": dataset_name,
+            "count": 0,
+            "min": 0,
+            "max": 0,
+            "mean": 0.0,
+            "median": 0.0,
+            "std": 0.0,
+            "percentile_25": 0.0,
+            "percentile_75": 0.0,
+            "percentile_90": 0.0,
+            "percentile_95": 0.0,
+            "percentile_99": 0.0,
+        }
 
     stats = {
         "dataset": dataset_name,
@@ -160,6 +207,7 @@ def analyze_dataset_lengths(dataset, dataset_name, dataset_type, tokenizer, max_
     char_lengths = []
     token_lengths = []
     word_lengths = []
+    empty_samples = 0
 
     dataset_size = len(dataset)
     if max_samples:
@@ -187,6 +235,29 @@ def analyze_dataset_lengths(dataset, dataset_name, dataset_type, tokenizer, max_
                 # If tokenization fails, skip this sample
                 print(f"Tokenization error for sample {i}: {e}")
                 token_lengths.append(0)
+        else:
+            empty_samples += 1
+            # Debug: Print first few failed extractions
+            if empty_samples <= 5:
+                print(f"Debug: Sample {i} - Failed to extract text. Keys: {list(sample.keys())}")
+                # Print first few characters of each field to understand the structure
+                for key, value in sample.items():
+                    if isinstance(value, str):
+                        print(f"  {key}: '{value[:50]}{'...' if len(value) > 50 else ''}'")
+                    elif isinstance(value, list) and len(value) > 0:
+                        print(f"  {key}: list[{len(value)}] - first item: {type(value[0])}")
+                        if isinstance(value[0], dict):
+                            print(f"    First item keys: {list(value[0].keys())}")
+                    else:
+                        print(f"  {key}: {type(value)}")
+
+    print(f"Valid samples with text: {len(char_lengths)}, Empty samples: {empty_samples}")
+
+    if len(char_lengths) == 0:
+        print(
+            f"Error: No valid text extracted from {dataset_name}. This suggests a problem with the dataset format or text extraction logic."
+        )
+        return None
 
     # Calculate statistics
     char_stats = calculate_sequence_statistics(char_lengths, f"{dataset_name} (characters)")
@@ -342,7 +413,10 @@ def main():
         "--max-samples", type=int, default=None, help="Maximum number of samples to analyze per dataset (default: all)"
     )
     parser.add_argument(
-        "--tokenizer", type=str, default="meta-llama/Llama-2-7b-hf", help="Tokenizer to use for token-level analysis"
+        "--tokenizer",
+        type=str,
+        default="/nobackup/model/llama3.1/Llama-3.1-8B-Instruct",
+        help="Tokenizer to use for token-level analysis",
     )
     parser.add_argument("--output-dir", type=str, default="sequence_analysis_results", help="Directory to save results")
     parser.add_argument("--no-plots", action="store_true", help="Skip generating plots")
@@ -362,19 +436,21 @@ def main():
     print("Loading datasets...")
 
     try:
-        sharegpt_dataset = datasets.load_dataset(
-            "json", data_files="/nobackup/qinghao/trace/ShareGPT_V4.3_unfiltered_cleaned_split.json", split="train"
-        )
-        print(f"ShareGPT dataset size: {len(sharegpt_dataset)}")
+        sharegpt_dataset = None
+        # sharegpt_dataset = datasets.load_dataset(
+        #     "json", data_files="/nobackup/qinghao/trace/ShareGPT_V4.3_unfiltered_cleaned_split.json", split="train"
+        # )
+        # print(f"ShareGPT dataset size: {len(sharegpt_dataset)}")
     except Exception as e:
         print(f"Error loading ShareGPT dataset: {e}")
         sharegpt_dataset = None
 
     try:
-        ultrachat_dataset = datasets.load_dataset(
-            "parquet", data_dir="/nobackup/qinghao/dataset/ultrachat_200k", split="train_sft"
-        )
-        print(f"UltraChat dataset size: {len(ultrachat_dataset)}")
+        ultrachat_dataset = None
+        # ultrachat_dataset = datasets.load_dataset(
+        #     "parquet", data_dir="/nobackup/qinghao/dataset/ultrachat_200k", split="train_sft"
+        # )
+        # print(f"UltraChat dataset size: {len(ultrachat_dataset)}")
     except Exception as e:
         print(f"Error loading UltraChat dataset: {e}")
         ultrachat_dataset = None
@@ -401,22 +477,29 @@ def main():
 
     if sharegpt_dataset:
         sharegpt_results = analyze_dataset_lengths(sharegpt_dataset, "ShareGPT", "sharegpt", tokenizer, args.max_samples)
-        all_results["ShareGPT"] = sharegpt_results
+        if sharegpt_results:
+            all_results["ShareGPT"] = sharegpt_results
 
     if ultrachat_dataset:
         ultrachat_results = analyze_dataset_lengths(ultrachat_dataset, "UltraChat", "ultrachat", tokenizer, args.max_samples)
-        all_results["UltraChat"] = ultrachat_results
+        if ultrachat_results:
+            all_results["UltraChat"] = ultrachat_results
 
     if openthoughts_dataset:
         openthoughts_results = analyze_dataset_lengths(
             openthoughts_dataset, "OpenThoughts2-1M", "openthoughts", tokenizer, args.max_samples
         )
-        all_results["OpenThoughts2-1M"] = openthoughts_results
+        if openthoughts_results:
+            all_results["OpenThoughts2-1M"] = openthoughts_results
 
     # Print results
     print("\n" + "=" * 60)
     print("SEQUENCE LENGTH ANALYSIS RESULTS")
     print("=" * 60)
+
+    if not all_results:
+        print("No valid datasets were processed successfully.")
+        return
 
     for dataset_name, results in all_results.items():
         print(f"\n{'='*40}")
