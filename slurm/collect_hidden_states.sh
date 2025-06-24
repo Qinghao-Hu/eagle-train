@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -A nvr_elm_llm                  #account
-#SBATCH -p polar,grizzly,batch_block1,batch_block3,batch_block2,batch_block4,interactive                         #partition
+#SBATCH -p batch_block1                 #partition
 #SBATCH -t 04:00:00                     #wall time limit, hr:min:sec
-#SBATCH -N 3                            #number of nodes
+#SBATCH -N 4                           #number of nodes
 #SBATCH --mem=0                         # all mem avail
 #SBATCH --gres=gpu:8
 #SBATCH -J nvr_elm_llm-tlt-eagle        #job name
