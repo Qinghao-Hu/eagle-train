@@ -1,4 +1,9 @@
-# srun -J datagen -N 1 --exclusive bash scripts/datagen.sh
+# srun -J datagen -N 3 --exclusive bash scripts/datagen.sh
+
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
+export MASTER_PORT=12355
+export WORLD_SIZE=$SLURM_NTASKS
+export RANK=$SLURM_PROCID
 
 
 MODEL_NAME=Llama-3.1-8B-Instruct
@@ -6,11 +11,13 @@ BASE_MODEL_PATH=/nobackup/model/llama3.1/${MODEL_NAME}
 DATA_PATH=/nobackup/qinghao/dataset/eagle-mix
 SAVE_DIR=/nobackup/qinghao/dataset/eagle-processed/Eagle-Mix-${MODEL_NAME}
 
-torchrun --standalone --nnodes=1 --nproc_per_node=8 eagle_datagen.py \
+torchrun --nnodes=$SLURM_JOB_NUM_NODES --nproc_per_node=8 --master_port=$MASTER_PORT \
+    --master_addr $MASTER_ADDR --node_rank=$SLURM_PROCID \
+    eagle_datagen.py \
     model.base_model_path=$BASE_MODEL_PATH \
     data.data_path=$DATA_PATH \
     data.save_dir=$SAVE_DIR \
-    data.max_length=4096
+    data.max_length=2048
 
 
 

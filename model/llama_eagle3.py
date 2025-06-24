@@ -193,15 +193,13 @@ class LlamaModelEagle3(LlamaModelTF):
 
         loss_list = []
         accuracy_list = []
+        past_key_values = DynamicCache()
 
         for idx in range(prediction_length):
             inputs_embeds = self.embed_tokens(input_ids)
             if self.training and self.gradient_checkpointing and not inputs_embeds.requires_grad:
                 inputs_embeds.requires_grad = True
             inputs_embeds = inputs_embeds.to(base_model_hidden_states.dtype)
-
-            # Reset cache for each prediction step to prevent accumulation
-            step_past_key_values = DynamicCache() if use_cache else None
 
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
@@ -210,7 +208,7 @@ class LlamaModelEagle3(LlamaModelTF):
                     hidden_states,
                     attention_mask,
                     position_ids,
-                    step_past_key_values,
+                    past_key_values,
                     output_attentions,
                     use_cache,
                     cache_position,
@@ -222,7 +220,7 @@ class LlamaModelEagle3(LlamaModelTF):
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
-                    past_key_value=step_past_key_values,
+                    past_key_value=past_key_values,
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
@@ -267,7 +265,7 @@ class LlamaModelEagle3(LlamaModelTF):
                 loss_mask = self._padding(loss_mask, left=False)
                 attention_mask = self._padding(attention_mask, left=False)
 
-            # Clean up step cache to prevent accumulation
-            del step_past_key_values
+            # # Clean up step cache to prevent accumulation
+            # del step_past_key_values
 
         return loss_list, accuracy_list
