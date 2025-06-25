@@ -1,24 +1,34 @@
-from typing import Optional, Tuple, Union
-import math
+# model/llama_eagle3.py 的修复版本
 
+import math
 import torch
 from torch import nn
+from typing import Optional, List, Tuple
 from transformers import LlamaConfig
 from transformers.models.llama.modeling_llama import (
     LlamaModel as LlamaModelTF,
-    LlamaRotaryEmbedding,
     LlamaMLP,
     LlamaRMSNorm,
-    rotate_half,
-    repeat_kv,
 )
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.processing_utils import Unpack
-from transformers.utils import logging
 
-logger = logging.get_logger(__name__)
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
@@ -30,7 +40,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
-
 
 class LlamaRotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
@@ -66,57 +75,13 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         )
 
 
-class LlamaLinearScalingRotaryEmbedding(LlamaRotaryEmbedding):
-    """LlamaRotaryEmbedding extended with linear scaling. Credits to the Reddit user /u/kaiokendev"""
+class LlamaEagle3Attention(nn.Module):
+    """Eagle3 specific attention module with custom cache mechanism"""
 
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None, scaling_factor=1.0):
-        self.scaling_factor = scaling_factor
-        super().__init__(dim, max_position_embeddings, base, device)
-
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
-        t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
-        t = t / self.scaling_factor
-
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
-
-
-class LlamaDynamicNTKScalingRotaryEmbedding(LlamaRotaryEmbedding):
-    """LlamaRotaryEmbedding extended with Dynamic NTK scaling. Credits to the Reddit users /u/bloc97 and /u/emozilla"""
-
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None, scaling_factor=1.0):
-        self.scaling_factor = scaling_factor
-        super().__init__(dim, max_position_embeddings, base, device)
-
-    def _set_cos_sin_cache(self, seq_len, device, dtype):
-        self.max_seq_len_cached = seq_len
-
-        if seq_len > self.max_position_embeddings:
-            base = self.base * ((self.scaling_factor * seq_len / self.max_position_embeddings) - (self.scaling_factor - 1)) ** (
-                self.dim / (self.dim - 2)
-            )
-            inv_freq = 1.0 / (base ** (torch.arange(0, self.dim, 2).float().to(device) / self.dim))
-            self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
-
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
-        # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
-
-
-class LlamaAttentionEagle3(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
-
-    def __init__(self, config):
+    def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
         self.config = config
+        self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.hidden_size // self.num_heads
@@ -129,11 +94,16 @@ class LlamaAttentionEagle3(nn.Module):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
+
+        # NOTE: Override the qkv projection for Eagle-3 (input is 2x hidden_size)
         self.q_proj = nn.Linear(self.hidden_size * 2, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(self.hidden_size * 2, self.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size * 2, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        self._init_rope()
+
+        self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
+
+        # self._init_rope()
 
     def _init_rope(self):
         if self.config.rope_scaling is None:
@@ -142,94 +112,153 @@ class LlamaAttentionEagle3(nn.Module):
             scaling_type = self.config.rope_scaling["type"]
             scaling_factor = self.config.rope_scaling["factor"]
             if scaling_type == "linear":
+                from transformers.models.llama.modeling_llama import LlamaLinearScalingRotaryEmbedding
+
                 self.rotary_emb = LlamaLinearScalingRotaryEmbedding(
                     self.head_dim, max_position_embeddings=self.max_position_embeddings, scaling_factor=scaling_factor
                 )
             elif scaling_type == "dynamic":
+                from transformers.models.llama.modeling_llama import LlamaDynamicNTKScalingRotaryEmbedding
+
                 self.rotary_emb = LlamaDynamicNTKScalingRotaryEmbedding(
                     self.head_dim, max_position_embeddings=self.max_position_embeddings, scaling_factor=scaling_factor
                 )
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
-
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cache_hidden: Optional[List[torch.Tensor]] = None,
+        cache_hidden: Optional[list] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        **kwargs,
+    ) -> Tuple[torch.Tensor]:
+        """
+        Eagle3 specific attention forward pass with custom cache mechanism
+        """
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        lck = len(cache_hidden[0])
-
-        # cache_k = [self.k_proj(hidden) for hidden in cache_hidden]
-        # cache_v = [self.v_proj(hidden) for hidden in cache_hidden]
+        # 🔧 修复1：安全地获取cache长度
+        lck = len(cache_hidden[0]) if (cache_hidden and len(cache_hidden) >= 2 and len(cache_hidden[0]) > 0) else 0
 
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        cos, sin = self.rotary_emb(query_states, seq_len=q_len + lck)
-        cos, sin = cos.to(query_states.device), sin.to(query_states.device)
-        # query_states = apply_rotary_pos_emb(query_states, cos, sin, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids + lck)
+        # 🔧 修复2：安全的位置编码处理
+        total_seq_len = q_len + lck
+        if total_seq_len > self.max_position_embeddings:
+            # 如果超出最大位置，使用截断的序列长度
+            total_seq_len = self.max_position_embeddings
 
+        cos, sin = self.rotary_emb(query_states, seq_len=total_seq_len)
+        cos, sin = cos.to(query_states.device), sin.to(query_states.device)
+
+        # 🔧 修复3：确保position_ids不会越界
+        if position_ids is not None:
+            # 限制position_ids在合理范围内
+            max_pos = cos.shape[2] - 1  # cos的序列长度维度
+            safe_position_ids = torch.clamp(position_ids + lck, 0, max_pos)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, safe_position_ids)
+        else:
+            # 如果没有position_ids，创建一个安全的默认值
+            default_pos_ids = torch.arange(q_len, device=query_states.device, dtype=torch.long).unsqueeze(0)
+            safe_position_ids = torch.clamp(default_pos_ids + lck, 0, cos.shape[2] - 1)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, safe_position_ids)
+
+        # Repeat key and value states for grouped query attention
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        cache_hidden[0] = cache_hidden[0] + [key_states]
-        cache_hidden[1] = cache_hidden[1] + [value_states]
+        # 🔧 修复4：安全的cache操作
+        if cache_hidden is not None:
+            # 确保cache_hidden有正确的结构
+            if len(cache_hidden) < 2:
+                cache_hidden.extend([[] for _ in range(2 - len(cache_hidden))])
 
-        cache_k = cache_hidden[0]
-        cache_v = cache_hidden[1]
+            cache_hidden[0].append(key_states)
+            cache_hidden[1].append(value_states)
 
-        k0 = cache_k[0]
-        v0 = cache_v[0]
+            cache_k = cache_hidden[0]
+            cache_v = cache_hidden[1]
+            num_caches = len(cache_k)
 
-        attn_weights = torch.matmul(query_states, k0.transpose(2, 3)) / math.sqrt(self.head_dim)
-        lck = len(cache_k)
+            if num_caches == 1:
+                # 第一个cache：直接使用标准注意力
+                k0 = cache_k[0]
+                v0 = cache_v[0]
 
-        attn_weights = attn_weights + attention_mask
+                # 🔧 修复5：确保维度匹配
+                # query_states: [batch, heads, seq_len, head_dim]
+                # k0: [batch, heads, seq_len, head_dim]
+                attn_weights = torch.matmul(query_states, k0.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        min_value = torch.finfo(attention_mask.dtype).min
-        for i in range(1, lck):
-            ki = cache_k[i]
+                if attention_mask is not None:
+                    # 确保attention_mask维度正确
+                    if attention_mask.dim() == 4:
+                        attn_weights = attn_weights + attention_mask
+                    elif attention_mask.dim() == 2:
+                        # 转换2D mask为4D
+                        expanded_mask = attention_mask[:, None, None, :].expand(bsz, 1, q_len, q_len)
+                        attn_weights = attn_weights + expanded_mask
 
-            qi = query_states
-            kiq = ki
+                # Apply softmax
+                attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
 
-            attn_weightsi = (qi * kiq).sum(-1) / math.sqrt(self.head_dim)
-            attn_weights = torch.cat((attn_weights, attn_weightsi[..., None]), dim=-1)
+                # Compute attention output
+                attn_output = torch.matmul(attn_weights, v0)
 
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights0 = attn_weights[..., :q_len]
+            else:
+                # 多个cache：Eagle3的特殊逻辑
+                k0 = cache_k[0]
+                v0 = cache_v[0]
 
-        attn_output = torch.matmul(attn_weights0, v0)
+                attn_weights = torch.matmul(query_states, k0.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        for i in range(1, lck):
-            vi = cache_v[i]
-            attn_weightsi = attn_weights[..., q_len + i - 1]
-            attn_outputi = attn_weightsi[..., None] * vi
-            attn_output = attn_output + attn_outputi
+                if attention_mask is not None:
+                    if attention_mask.dim() == 4:
+                        attn_weights = attn_weights + attention_mask
+                    elif attention_mask.dim() == 2:
+                        expanded_mask = attention_mask[:, None, None, :].expand(bsz, 1, q_len, q_len)
+                        attn_weights = attn_weights + expanded_mask
 
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+                # Eagle3的特殊计算：后续cache使用元素级点积
+                for i in range(1, num_caches):
+                    ki = cache_k[i]
+                    qi = query_states
 
-        attn_output = self.o_proj(attn_output)
+                    # 🔧 修复6：确保维度匹配进行元素级乘法
+                    if qi.shape == ki.shape:
+                        attn_weightsi = (qi * ki).sum(-1) / math.sqrt(self.head_dim)
+                        attn_weights = torch.cat((attn_weights, attn_weightsi[..., None]), dim=-1)
 
-        return attn_output
+                # Apply softmax
+                attn_weights = torch.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                attn_weights0 = attn_weights[..., :q_len]
+
+                # Compute attention output
+                attn_output = torch.matmul(attn_weights0, v0)
+
+                # 添加后续cache的贡献
+                for i in range(1, num_caches):
+                    vi = cache_v[i]
+                    attn_weightsi = attn_weights[..., q_len + i - 1]
+                    attn_outputi = attn_weightsi[..., None] * vi
+                    attn_output = attn_output + attn_outputi
+
+            # 最终处理
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+            attn_output = self.o_proj(attn_output)
+
+            return attn_output
+        else:
+            raise ValueError("cache_hidden must be provided for Eagle3")
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -239,7 +268,7 @@ class LlamaDecoderLayer(nn.Module):
         self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
 
         # Use Eagle3 specific attention
-        self.self_attn = LlamaAttentionEagle3(config=config, layer_idx=layer_idx)
+        self.self_attn = LlamaEagle3Attention(config=config, layer_idx=layer_idx)
 
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -284,15 +313,14 @@ class LlamaDecoderLayer(nn.Module):
 
 
 class LlamaModelEagle3(LlamaModelTF):
+
     def __init__(self, config: LlamaConfig):
-        # super().__init__(config)
         nn.Module.__init__(self)
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.rotary_emb = LlamaRotaryEmbedding(config=config)
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         self.lm_head = nn.Linear(config.hidden_size, config.draft_vocab_size, bias=False)
@@ -321,34 +349,50 @@ class LlamaModelEagle3(LlamaModelTF):
             tensor = torch.cat((tensor[:, 1:], zeropadding), dim=1)
         return tensor
 
+    def _prepare_4d_attention_mask(self, attention_mask, input_shape, device, dtype):
+        """
+        Create 4D attention mask from 2D mask for causal attention
+        """
+        batch_size, seq_length = input_shape
+
+        # Create causal mask
+        causal_mask = torch.full((seq_length, seq_length), torch.finfo(dtype).min, device=device, dtype=dtype)
+        mask_cond = torch.arange(seq_length, device=device)
+        causal_mask.masked_fill_(mask_cond < (mask_cond + 1).view(seq_length, 1), 0)
+        causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, seq_length, seq_length)
+
+        if attention_mask is not None:
+            # Expand 2D attention mask to 4D
+            if attention_mask.dim() == 2:
+                expanded_mask = attention_mask[:, None, None, :].expand(batch_size, 1, seq_length, seq_length)
+                # Invert mask (1 -> 0, 0 -> large negative)
+                inverted_mask = (1.0 - expanded_mask).to(dtype)
+                inverted_mask = inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
+                causal_mask = causal_mask + inverted_mask
+
+        return causal_mask
+
     def forward(
         self,
         base_model_hidden_states: torch.Tensor,
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[object] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        # Eagle 3 Args: Test-Time Scaling
         prediction_length: Optional[int] = 1,
         target: Optional[torch.Tensor] = None,
         loss_mask: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+    ):
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
-
-        if cache_position is None:
-            cache_position = torch.arange(0, target.shape[1], device=target.device)
-
-        if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)
 
         hidden_states = base_model_hidden_states
 
@@ -362,8 +406,12 @@ class LlamaModelEagle3(LlamaModelTF):
         loss_list = []
         accuracy_list = []
 
-        # Initialize Eagle3 specific cache (not DynamicCache)
+        # 🔧 修复7：正确初始化Eagle3 cache
         cache_hidden = [[], []]
+
+        # 🔧 修复8：初始化position_ids
+        if position_ids is None:
+            position_ids = torch.arange(0, seq_length, dtype=torch.long, device=input_ids.device).unsqueeze(0)
 
         for idx in range(prediction_length):
             inputs_embeds = self.embed_tokens(input_ids)
@@ -371,13 +419,22 @@ class LlamaModelEagle3(LlamaModelTF):
                 inputs_embeds.requires_grad = True
             inputs_embeds = inputs_embeds.to(base_model_hidden_states.dtype)
 
+            # 🔧 修复9：准备正确的4D attention mask
+            current_seq_len = input_ids.shape[1]
+            if attention_mask is not None:
+                attention_mask_4d = self._prepare_4d_attention_mask(
+                    attention_mask, (batch_size, current_seq_len), input_ids.device, inputs_embeds.dtype
+                )
+            else:
+                attention_mask_4d = None
+
             if self.gradient_checkpointing and self.training:
                 layer_outputs = self._gradient_checkpointing_func(
                     self.midlayer.__call__,
                     inputs_embeds,
                     hidden_states,
                     cache_hidden,
-                    attention_mask,
+                    attention_mask_4d,
                     position_ids,
                 )
             else:
@@ -385,7 +442,7 @@ class LlamaModelEagle3(LlamaModelTF):
                     input_embeds=inputs_embeds,
                     hidden_states=hidden_states,
                     cache_hidden=cache_hidden,
-                    attention_mask=attention_mask,
+                    attention_mask=attention_mask_4d,
                     position_ids=position_ids,
                 )
 
@@ -424,16 +481,14 @@ class LlamaModelEagle3(LlamaModelTF):
                 target = self._padding(target, left=False)
                 loss_mask = self._padding(loss_mask, left=False)
 
-                if attention_mask.dim() == 4:  # [batch, 1, seq, seq]
-                    current_seq_len = attention_mask.shape[-1]
-                    ind = torch.arange(current_seq_len, device=attention_mask.device)
-                    ind0 = ind[idx + 1 :]  # positions that will be masked
-                    ind1 = ind[: current_seq_len - idx - 1]  # positions they can't see
+                # 🔧 修复10：正确更新attention_mask
+                if attention_mask is not None:
+                    attention_mask = self._padding(attention_mask, left=False)
 
-                    if len(ind0) > 0 and len(ind1) > 0:
-                        attention_mask[:, :, ind0, ind1] = torch.finfo(attention_mask.dtype).min
-
-                # Update position_ids for next iteration
+                # 🔧 修复11：更新position_ids
                 position_ids = position_ids + 1
+                # 确保position_ids不会超出范围
+                max_pos = self.config.max_position_embeddings - 1
+                position_ids = torch.clamp(position_ids, 0, max_pos)
 
         return loss_list, accuracy_list
