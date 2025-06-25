@@ -62,7 +62,7 @@ class TokenizationProcessor:
             self.model_type = "deepseek"
             logger.info(f"Detected DeepSeek model type")
             self.sep_assistant = "<｜Assistant｜>\n\n"
-            self.sep_user = "<｜User｜>"
+            self.sep_user = ""
         elif "qwen" in model_path.lower():
             self.model_type = "qwen"
             logger.info(f"Detected Qwen model type")
@@ -320,10 +320,10 @@ if __name__ == "__main__":
     # parser.add_argument("--model_path", type=str, default="/nobackup/model/qwen3/Qwen3-8B", help="The path to the model.")
     parser.add_argument("--model_name", type=str, default="qwen2.5", help="The name of the model.")
     parser.add_argument(
-        "--model_path", type=str, default="/nobackup/model/qwen2.5/Qwen2.5-7B-Instruct", help="The path to the model."
+        "--model_path", type=str, default="/home/shangy/TLT/models/Qwen/Qwen2.5-7B-Instruct", help="The path to the model."
     )
     parser.add_argument(
-        "--dataset_path", type=str, default="/nobackup/qinghao/dataset/eagle-mix", help="The path to the dataset."
+        "--dataset_path", type=str, default="/home/shangy/TLT/dataset/eagle-mix/", help="The path to the dataset."
     )
     parser.add_argument("--vocab_size", nargs="+", type=int, default=[32768], help="The vocab sizes to process.")
     parser.add_argument("--max_length", type=int, default=32768, help="Maximum sequence length for tokenization.")
@@ -331,5 +331,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_proc", type=int, default=32, help="Number of processes for parallel processing.")
 
     args = parser.parse_args()
+    # get model name from model_path
+    model_name = os.path.basename(args.model_path)
+    args.model_name = model_name
+
     print(args)
     main(args)

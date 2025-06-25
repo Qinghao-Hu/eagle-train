@@ -34,6 +34,7 @@ torchrun --nnodes=$SLURM_JOB_NUM_NODES --nproc_per_node=8 --master_port=$MASTER_
     --batch_size $BATCH_SIZE \
     --epochs $EPOCHS \
     --precision bf16 \
-    --max_len $MAX_LEN 
+    --max_len $MAX_LEN  \
+    --freq_map_path freq_map/qwen2/freq_32768.pt
 
 # srun -J eagle3 -N 1 --exclusive bash scripts/train_eagle3.sh
